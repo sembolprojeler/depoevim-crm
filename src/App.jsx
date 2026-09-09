@@ -2732,6 +2732,12 @@ const cust = {
               proxyDocumentPhotos: newCustomer.hasProxy ? (newCustomer.proxyDocumentPhotos || []) : [],
               type: customerType,
               createdAt: new Date().toLocaleDateString('tr-TR'),
+              // YENİ: Cariyi OLUŞTURAN kullanıcı. Daha önce yazılmıyordu; bu yüzden Personel Rapor'da
+              // "Müşteri Kaydı" herkes için 0 görünüyordu (rapor c.createdBy === personelAdı ile sayar).
+              // Excel aktarımı (musteri.jsx) bu alanı zaten yazıyordu, artık elle kayıt da yazıyor.
+              createdBy: currentUserProfile?.name || 'Sistem',
+              createdByRole: currentUserProfile?.role || '',
+              createdAtTs: Date.now(),   // dakika hassasiyetinde oluşturma zamanı (profilde gösterim için)
               invoices: [],
               documentPhoto: newCustomer.documentPhotoFront || null,
               documentPhotoFront: newCustomer.documentPhotoFront || null,
