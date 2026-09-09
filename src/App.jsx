@@ -1337,7 +1337,7 @@ const [firebaseUser, setFirebaseUser] = useState(null);
   const [customerType, setCustomerType] = useState('bireysel'); 
   
   const [newCustomer, setNewCustomer] = useState({
-      name: '', tc: '', phone: '', altPhone: '', address: '', city: 'İstanbul', district: '', taxOffice: '', notes: '',
+      name: '', tc: '', phone: '', altPhone: '', email: '', address: '', city: 'İstanbul', district: '', taxOffice: '', notes: '',
       hasProxy: false, proxyName: '', proxyTc: '', proxyPhone: '', proxyAltPhone: '', proxyAddress: '', proxyDocumentPhoto: null,
       documentPhotoFront: null, documentPhotoBack: null
   });
@@ -2714,6 +2714,8 @@ const cust = {
               tc: newCustomer.tc,
               phone: newCustomer.phone,
               altPhone: newCustomer.altPhone,
+              // YENİ: Müşteri e-posta adresi (isteğe bağlı) — Paraşüt fatura gönderimi ve bilgilendirme için kullanılabilir
+              email: String(newCustomer.email || '').trim().toLowerCase(),
               address: newCustomer.address,
               city: newCustomer.city,
               district: newCustomer.district,
@@ -2748,7 +2750,7 @@ const cust = {
       }
       
       setCustomerSaveError('');
-      setNewCustomer({ name: '', tc: '', phone: '', altPhone: '', address: '', city: 'İstanbul', district: '', taxOffice: '', notes: '', documentPhotoFront: null, documentPhotoBack: null, hasProxy: false, proxyName: '', proxyTc: '', proxyPhone: '', proxyAltPhone: '', proxyAddress: '', proxyDocumentPhoto: null });
+      setNewCustomer({ name: '', tc: '', phone: '', altPhone: '', email: '', address: '', city: 'İstanbul', district: '', taxOffice: '', notes: '', documentPhotoFront: null, documentPhotoBack: null, hasProxy: false, proxyName: '', proxyTc: '', proxyPhone: '', proxyAltPhone: '', proxyAddress: '', proxyDocumentPhoto: null });
       // YENİ: Hızlı ekleme modalından geldiyse sayfaya GİTME — modalı kapat ve
       // kiralama formunda yeni müşteriyi otomatik SEÇ (mevcut müşteri seçilmiş gibi).
       if (isQuickCustomerModalOpen) {
@@ -2789,6 +2791,8 @@ const renderNewCustomerForm = () => (
                   )}
                   <div className="flex flex-col gap-1.5"><label className="text-xs font-bold text-gray-600 uppercase tracking-wider">Telefon Numarası (Zorunlu)</label><input type="text" value={newCustomer.phone} onChange={(e) => setNewCustomer({...newCustomer, phone: e.target.value})} placeholder="Örn: 0555 555 55 55" className="border-2 border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-red-400 font-medium text-slate-700" /></div>
                   <div className="flex flex-col gap-1.5"><label className="text-xs font-bold text-gray-600 uppercase tracking-wider">Alternatif Telefon (İsteğe Bağlı)</label><input type="text" value={newCustomer.altPhone} onChange={(e) => setNewCustomer({...newCustomer, altPhone: e.target.value})} placeholder="Örn: 0555 555 55 55" className="border-2 border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-red-400 font-medium text-slate-700" /></div>
+                  {/* YENİ EKLENEN: E-Posta Adresi (isteğe bağlı) — Bireysel ve Kurumsalda aynı. Fatura/bilgilendirme gönderimi için. */}
+                  <div className="flex flex-col gap-1.5"><label className="text-xs font-bold text-gray-600 uppercase tracking-wider">E-Posta Adresi (İsteğe Bağlı)</label><input type="email" value={newCustomer.email || ''} onChange={(e) => setNewCustomer({...newCustomer, email: e.target.value})} placeholder="Örn: musteri@ornek.com" className="border-2 border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-red-400 font-medium text-slate-700" /></div>
                   {/* YENİ EKLENEN: İl (seçilebilir, 81 il, varsayılan İstanbul) ve İlçe (elle yazılabilir) — Bireysel ve Kurumsalda aynı */}
                   <div className="flex flex-col gap-1.5"><label className="text-xs font-bold text-gray-600 uppercase tracking-wider">İl</label>
                       <select value={newCustomer.city} onChange={(e) => setNewCustomer({...newCustomer, city: e.target.value})} className="border-2 border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-red-400 font-medium text-slate-700 bg-white">
