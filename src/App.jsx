@@ -903,11 +903,25 @@ const [firebaseUser, setFirebaseUser] = useState(null);
       // OKUMA LİMİTİ: Tarih penceresine EK OLARAK 200 kayıt sınırı. orderBy('date') ile pencerenin
       // EN YENİ değil EN ESKİ ucundan başlanır; 200'ü aşan çok eski kayıtlar zaten aşağıdaki
       // tek seferlik "daha eski yükle" akışıyla getDocs ile çekilir.
-      const unsubAppointments = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'appointments'), where('date', '>=', APPT_CUTOFF), orderBy('date'), limit(200)), (snapshot) => {
+      // ═══════════════════════════════════════════════════════════════════════
+      // DÜZELTİLDİ (RANDEVU GÖRÜNMEME SORUNU):
+      // ESKİ HATA: orderBy('date') ARTAN sıra + limit(200) → pencere EN ESKİ uçtan (90 gün önce)
+      // başlıyordu. Son 90 günde 200'den fazla randevu olunca BUGÜN ve GELECEK randevular
+      // listeye hiç girmiyordu; yeni kaydedilen randevu Firebase'e yazılsa da ekranda görünmüyordu.
+      // YENİ: orderBy('date','desc') AZALAN sıra → pencere EN YENİ uçtan (gelecek/bugün) başlar,
+      // yeni eklenen randevu her zaman pencerenin içindedir. Limit de 500'e çıkarıldı
+      // (onSnapshot ilk yüklemeden sonra yalnızca değişen belgeleri okur; maliyet artmaz).
+      // ═══════════════════════════════════════════════════════════════════════
+      const APPT_LIVE_LIMIT = 500;
+      const unsubAppointments = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'appointments'), where('date', '>=', APPT_CUTOFF), orderBy('date', 'desc'), limit(APPT_LIVE_LIMIT)), (snapshot) => {
           const fetchedData = snapshot.docs.map(doc => ({ id: Number(doc.id) || doc.id, ...doc.data() }));
-          // Daha önce "eski kayıt yükle" ile gelen 90 gün öncesi randevular korunur; pencere içi tazelenir.
+          // Limit dolduysa pencerenin GERÇEK alt sınırı, gelen en eski kayıttır; dolmadıysa cutoff'tur.
+          // Bu sınırın ALTINDAKİ (daha eski) kayıtlar state'te korunur, pencere içi tazelenir.
+          const windowStart = fetchedData.length >= APPT_LIVE_LIMIT
+              ? fetchedData.reduce((min, a) => (String(a.date || '') < min ? String(a.date || '') : min), '9999-12-31')
+              : APPT_CUTOFF;
           setAppointments(prev => {
-              const older = (prev || []).filter(a => a && String(a.date || '') < APPT_CUTOFF);
+              const older = (prev || []).filter(a => a && String(a.date || '') < windowStart);
               const m = new Map(); [...older, ...fetchedData].forEach(a => m.set(String(a.id), a));
               return Array.from(m.values());
           });
@@ -5608,12 +5622,14 @@ const newAppt = {
     };
 
     // FİREBASE'E KAYIT İŞLEMİ
+    // DÜZELTİLDİ: Randevu daha önce SADECE Firebase dinleyicisi (onSnapshot) döndüğünde ekrana geliyordu.
+    // Artık kayıt anında yerel state'e de eklenir (optimistic update) → kullanıcı takvimde hemen görür;
+    // dinleyici geldiğinde aynı id ile birleştirildiği için çift kayıt oluşmaz.
+    setAppointments(prev => (prev || []).some(a => String(a.id) === String(newAppt.id)) ? prev : [...(prev || []), newAppt]);
     if (db && firebaseUser) {
         try {
             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'appointments', String(newAppt.id)), newAppt);
         } catch(e) { console.error("Firebase Randevu Kayıt Hatası:", e); }
-    } else {
-        setAppointments(prev => [...prev, newAppt]);
     }
 
     // YENİ: WhatsApp'tan bilgilendirme istendiyse mesaj penceresini aç
@@ -5657,6 +5673,8 @@ const newAppt = {
 
   const handleSaveEditAppointment = async () => {
       if (!editApptData) return;
+      // DÜZELTİLDİ: Düzenleme de anında yerel state'e yansıtılır (dinleyici gecikmesine bağlı kalmaz)
+      setAppointments(prev => (prev || []).map(a => String(a.id) === String(editApptData.id) ? { ...a, ...editApptData } : a));
       if (db && firebaseUser) {
           try {
               await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'appointments', String(editApptData.id)), editApptData, { merge: true });
