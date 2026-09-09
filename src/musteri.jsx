@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { doc, setDoc, deleteDoc, arrayUnion } from 'firebase/firestore';
 import {
   AlertCircle,
+  UserPlus,   // YENİ: "Kaydeden" rozeti ikonu
   ArrowLeft,
   Bell,
   Box,
@@ -1181,6 +1182,12 @@ const reader = new FileReader();
                                          Kayıt: {customer.createdAt || '01.01.2026'}
                                          <button onClick={() => { setEditCustomerData({...customer}); setIsEditCustomerModalOpen(true); }} className="hover:text-[#1bc5bd] transition-colors bg-white p-0.5 rounded shadow-sm border border-gray-200" title="Müşteri Bilgilerini Düzenle"><Edit size={10} /></button>
                                      </span>
+                                     {/* YENİ: Cariyi oluşturan kullanıcı rozeti (eski kayıtlarda alan yoksa gösterilmez) */}
+                                     {customer.createdBy && (
+                                         <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded text-[10px] font-bold ml-2 border border-indigo-100 shadow-sm flex items-center gap-1" title={`Bu cariyi ${customer.createdBy} oluşturdu${customer.createdByRole ? ' (' + customer.createdByRole + ')' : ''}${customer.createdAtTs ? ' • ' + new Date(customer.createdAtTs).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}`}>
+                                             <UserPlus size={10} /> Kaydeden: {customer.createdBy}{customer.createdByRole ? <span className="text-indigo-400 font-medium">({customer.createdByRole})</span> : null}
+                                         </span>
+                                     )}
                                  </h3>
                                  <p className="text-sm font-medium text-[#1bc5bd]">Müşteri No: {customer.customerNo}</p>
                                  <div className="flex gap-4 mt-2 text-xs text-gray-500 font-medium">
