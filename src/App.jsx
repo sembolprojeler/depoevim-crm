@@ -8041,12 +8041,14 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
 
                                       {/* Aksiyonlar */}
                                       <div className="flex flex-wrap gap-2 justify-end" onClick={e => e.stopPropagation()}>
-                                          {/* YENİ: İCRA DOSYASI — yasal süreç hareketleri + dosya/foto/video. Son durum ve belge sayısı görünür. */}
-                                          <button onClick={() => { setLegalProcForm(emptyLegalProcForm()); setLegalFileModalRoomId(room.id); }} className="flex items-center gap-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 px-3 py-2 rounded-lg text-xs font-bold transition-colors">
-                                              <FileTextIcon size={14} /> Yasal Süreç / Dosya
+                                          {/* YENİ: İCRA DOSYASI — yasal süreç hareketleri + dosya/foto/video. Son durum ve belge sayısı görünür.
+                                              GÜNCELLENDİ: Buton diğerlerinden belirgin biçimde büyütüldü (daha geniş padding + büyük yazı),
+                                              yanındaki durum rozeti ("İcra Başlatıldı") mor yerine AMBER/TURUNCU yapıldı ki buton zemininden ayrışsın. */}
+                                          <button onClick={() => { setLegalProcForm(emptyLegalProcForm()); setLegalFileModalRoomId(room.id); }} className="flex items-center gap-2 bg-purple-50 hover:bg-purple-100 text-purple-700 border-2 border-purple-200 px-4 py-3 rounded-xl text-sm font-bold transition-colors shadow-sm">
+                                              <FileTextIcon size={18} /> Yasal Süreç / Dosya
                                               {(() => { const lp = room.legalProcess || []; const lf = room.legalFiles || []; const last = lp.length ? [...lp].sort((a, b) => String(b.date).localeCompare(String(a.date)) || (b.createdAt || 0) - (a.createdAt || 0))[0] : null; return (<>
-                                                  {last && <span className="ml-1 text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-600 text-white max-w-[130px] truncate">{last.status}</span>}
-                                                  {lf.length > 0 && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-200 text-purple-800">{lf.length} belge</span>}
+                                                  {last && <span className="ml-1 text-[11px] font-black px-2.5 py-1 rounded-lg bg-amber-500 text-white border border-amber-600 max-w-[150px] truncate shadow-sm">{last.status}</span>}
+                                                  {lf.length > 0 && <span className="text-[11px] font-bold px-2 py-1 rounded-lg bg-purple-200 text-purple-800">{lf.length} belge</span>}
                                               </>); })()}
                                           </button>
                                           {/* YENİ: İcrayı Kaldır — odayı hiç icraya alınmamış gibi normale döndürür (onay penceresiyle). */}
