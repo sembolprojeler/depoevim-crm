@@ -1614,6 +1614,14 @@ const reader = new FileReader();
                                            <td className="px-6 py-3 whitespace-nowrap font-medium">{tx.dateStr}</td>
                                            <td className="px-6 py-3">
                                               {tx.desc}
+                                              {/* YENİ: Tahsilatın dağılımı — faize giden kısım varsa gösterilir (önce faiz, sonra ana para kuralı) */}
+                                              {tx.credit > 0 && !tx.needsConfirm && (Number(tx.appliedToInterest) || 0) > 0.5 && (
+                                                <div className="mt-1 flex flex-wrap items-center gap-1">
+                                                   <span className="text-[9px] font-bold text-rose-600 bg-rose-50 border border-rose-100 px-1.5 py-0.5 rounded">Faize: {Math.round(tx.appliedToInterest).toLocaleString('tr-TR')} TL</span>
+                                                   {(Number(tx.appliedToPrincipal) || 0) > 0.5 && <span className="text-[9px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded">Ana paraya: {Math.round(tx.appliedToPrincipal).toLocaleString('tr-TR')} TL</span>}
+                                                   {(Number(tx.appliedToAdvance) || 0) > 0.5 && <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded">Avans: {Math.round(tx.appliedToAdvance).toLocaleString('tr-TR')} TL</span>}
+                                                </div>
+                                              )}
                                               {tx.needsConfirm && (
                                                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                                                    <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Aynı gün / aynı tutar — onay bekliyor (bakiyeye işlenmedi)</span>
@@ -1654,9 +1662,24 @@ const reader = new FileReader();
                                                    pasifken hiç üretilmez). Faiz yoksa bu satır görünmez. */}
                                                {(() => {
                                                    if (runningBalance <= 0) return null;
-                                                   const _intTotal = (getCustomerLedger(customer).ledger || []).reduce((s, t) => s + (t.isInterest ? (Number(t.debt) || 0) : 0), 0);
-                                                   if (_intTotal <= 0) return null;
-                                                   return <span className="block mt-1.5 text-[10px] font-bold text-rose-500">{Math.round(_intTotal).toLocaleString('tr-TR')} TL faiz dahildir</span>;
+                                                   // GÜNCELLENDİ: Artık ÖDENMEMİŞ faiz gösterilir. Tahsilat önce faizi kapattığı için,
+                                                   // kısmi ödeme sonrası kapanan faiz bu tutarın DIŞINDA kalır (eski kod tüm üretilen faizi topluyordu).
+                                                   const _ledgerRes = getCustomerLedger(customer);
+                                                   const _intTotal = (_ledgerRes.outstandingInterest !== undefined)
+                                                       ? Number(_ledgerRes.outstandingInterest || 0)
+                                                       : (_ledgerRes.ledger || []).reduce((s, t) => s + (t.isInterest ? (Number(t.debt) || 0) : 0), 0);
+                                                   // GÜNCELLENDİ: Toplam borcun altında ANA PARA ve FAİZ ayrı ayrı gösterilir.
+                                                   // Ana para = motorun ödenmemiş ana para toplamı (yoksa bakiye - faiz). Faiz 0 ise sadece ana para satırı görünür.
+                                                   const _prinTotal = (_ledgerRes.outstandingPrincipal !== undefined)
+                                                       ? Number(_ledgerRes.outstandingPrincipal || 0)
+                                                       : Math.max(0, runningBalance - _intTotal);
+                                                   const _fmt = (n) => Math.round(n).toLocaleString('tr-TR');
+                                                   return (
+                                                       <div className="mt-2 inline-flex flex-col items-end gap-1">
+                                                           <span className="text-[10px] font-bold text-slate-600 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded whitespace-nowrap">Ana Para: {_fmt(_prinTotal)} TL</span>
+                                                           {_intTotal > 0.5 && <span className="text-[10px] font-bold text-rose-600 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded whitespace-nowrap">Faiz: {_fmt(_intTotal)} TL</span>}
+                                                       </div>
+                                                   );
                                                })()}
                                            </td>
                                         </tr>
