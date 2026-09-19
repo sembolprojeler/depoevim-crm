@@ -6614,7 +6614,8 @@ if (isDueYet && !selectedRoomDetail.paidMonths?.includes(key) && !isGifted && !i
                   const _amt = _d.remaining * _effRate;   // yalnız BU KALEMİN kalanına faiz
                   runningBalance += _amt;
                   // Faiz de ödenebilir bir kalemdir; ama faize faiz işlemez (next = sonsuz)
-                  openDebts.push({ key: `${_d.key}-f${_min}`, date: _min, remaining: _amt, next: _FAR_FUTURE });
+                  // YENİ: isInt=true → tahsilat dağıtımında ÖNCE bu kalemler kapatılır (bkz. TAHSİLAT bloğu)
+                  openDebts.push({ key: `${_d.key}-f${_min}`, date: _min, remaining: _amt, next: _FAR_FUTURE, isInt: true });
                   finalLedger.push({
                       id: `interest-${_min}-${_d.key}`,
                       date: _tickDate,
@@ -6657,15 +6658,34 @@ if (isDueYet && !selectedRoomDetail.paidMonths?.includes(key) && !isGifted && !i
           }
 
           // TAHSİLAT: en eski borçtan başlayarak kapat (FIFO); artan avans havuzuna
+          // TAHSİLAT DAĞITIMI — GÜNCELLENDİ (ÖNCE FAİZ, SONRA ANA PARA)
+          // ESKİ: Tüm açık kalemler tarihe göre karışık FIFO kapatılıyordu → eski tarihli ANA PARA,
+          //       yeni tarihli FAİZ'den önce ödeniyor, faiz açıkta kalıp cariyi şişiriyordu.
+          // YENİ KURAL:
+          //   1) Ödeme ÖNCE birikmiş FAİZ kalemlerini (en eskiden başlayarak) SIFIRLAR.
+          //   2) Artan tutar ANA PARA kalemlerini en eskiden başlayarak (FIFO) düşer.
+          //   3) Sonraki faiz vuruşları zaten her kalemin KALAN'ına işlediği için, faiz artık
+          //      küçülmüş yeni ana para üzerinden hesaplanır (faize faiz yine işlemez).
+          //   4) Hâlâ artan varsa avans havuzuna gider (sonraki borcu anında düşer).
+          // Ödemenin ne kadarının faize / ana paraya gittiği satıra yazılır (caride gösterim için).
           if ((Number(tx.credit) || 0) > 0.001) {
               let _pay = Number(tx.credit);
-              const _sorted = openDebts.filter(d => d.remaining > 0.01).sort((a, b) => a.date - b.date);
+              let _toInt = 0, _toPrin = 0;
+              const _open = openDebts.filter(d => d.remaining > 0.01);
+              const _sorted = [
+                  ..._open.filter(d => d.isInt).sort((a, b) => a.date - b.date),   // 1) faizler (eski → yeni)
+                  ..._open.filter(d => !d.isInt).sort((a, b) => a.date - b.date)   // 2) ana paralar (eski → yeni)
+              ];
               for (const d of _sorted) {
                   if (_pay <= 0.01) break;
                   const _use = Math.min(d.remaining, _pay);
                   d.remaining -= _use; _pay -= _use;
+                  if (d.isInt) _toInt += _use; else _toPrin += _use;
               }
               if (_pay > 0.01) creditPool += _pay;
+              tx.appliedToInterest = _toInt;   // bu tahsilatın faize giden kısmı
+              tx.appliedToPrincipal = _toPrin; // bu tahsilatın ana paraya giden kısmı
+              tx.appliedToAdvance = _pay > 0.01 ? _pay : 0; // avansa kalan
           }
 
           runningBalance += ((Number(tx.debt) || 0) - (Number(tx.credit) || 0));
@@ -6675,7 +6695,13 @@ if (isDueYet && !selectedRoomDetail.paidMonths?.includes(key) && !isGifted && !i
       // Son işlemden bugüne kadar vadesi gelmiş faizleri de işle
       _chargeTicksUpTo(_interestHorizon);
 
-      return { ledger: finalLedger, balance: runningBalance };
+      // YENİ: Bakiyenin içindeki ÖDENMEMİŞ faiz ve ÖDENMEMİŞ ana para ayrımı.
+      // Faiz önce ödendiği için, kısmi tahsilat sonrası "faiz dahildir" ibaresi yalnızca
+      // gerçekten açıkta kalan faizi gösterir (ödenip kapanmış faizler sayılmaz).
+      const outstandingInterest = openDebts.reduce((s, d) => s + (d.isInt && d.remaining > 0.01 ? d.remaining : 0), 0);
+      const outstandingPrincipal = openDebts.reduce((s, d) => s + (!d.isInt && d.remaining > 0.01 ? d.remaining : 0), 0);
+
+      return { ledger: finalLedger, balance: runningBalance, outstandingInterest, outstandingPrincipal, advance: creditPool };
   };
 
   let customerTotalBalance = 0;
