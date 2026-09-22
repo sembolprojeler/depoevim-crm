@@ -10987,7 +10987,30 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                <div className="flex flex-col gap-4">
                   <div className="flex flex-col gap-1.5"><label className="text-xs font-bold text-gray-600 uppercase tracking-wider">Müşteri Ad Soyad</label><input type="text" value={reserveData.name} onChange={(e) => setReserveData({...reserveData, name: e.target.value.toUpperCase()})} placeholder="Örn: AHMET YILMAZ" className="border-2 border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-orange-500 font-medium text-slate-700" /></div>
                   <div className="flex flex-col gap-1.5"><label className="text-xs font-bold text-gray-600 uppercase tracking-wider">Telefon Numarası</label><input type="text" value={reserveData.phone} onChange={(e) => setReserveData({...reserveData, phone: e.target.value})} placeholder="Örn: 0555 555 55 55" className="border-2 border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-orange-500 font-medium text-slate-700" /></div>
-                  <div className="flex flex-col gap-1.5"><label className="text-xs font-bold text-gray-600 uppercase tracking-wider">Rezerve Süresi (Maks 10 Gün)</label><input type="number" min="1" max="10" value={reserveData.days} onChange={(e) => setReserveData({...reserveData, days: e.target.value > 10 ? 10 : e.target.value})} className="border-2 border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-orange-500 font-medium text-slate-700" /><p className="text-[10px] text-gray-400 mt-1">Sistem, belirtilen gün dolduğunda odayı otomatik olarak tekrar boş konuma düşürür.</p></div>
+                  {/* GÜNCELLENDİ: Rezerve süresi artık 10 günle SINIRLI DEĞİL. Varsayılan 10 gün gelir;
+                      −/+ butonları veya doğrudan yazarak duruma göre azaltılıp artırılabilir (min 1, üst sınır 365 güvenlik amaçlı).
+                      Hızlı seçim çipleri (3/5/7/10/15/30 gün) tek tıkla süre ayarlar. */}
+                  {(() => {
+                      const _d = Math.max(1, parseInt(reserveData.days) || 1);
+                      const _setDays = (v) => setReserveData({ ...reserveData, days: Math.min(365, Math.max(1, parseInt(v) || 1)) });
+                      const _exp = new Date(); _exp.setDate(_exp.getDate() + _d); // bitiş tarihi önizlemesi
+                      return (
+                          <div className="flex flex-col gap-1.5">
+                              <label className="text-xs font-bold text-gray-600 uppercase tracking-wider">Rezerve Süresi (Gün)</label>
+                              <div className="flex items-stretch border-2 border-gray-200 rounded-xl overflow-hidden focus-within:border-orange-500">
+                                  <button type="button" onClick={() => _setDays(_d - 1)} disabled={_d <= 1} className="px-4 bg-gray-50 hover:bg-orange-50 text-slate-700 font-black text-lg disabled:opacity-30 disabled:cursor-not-allowed transition-colors border-r border-gray-200" title="Azalt">−</button>
+                                  <input type="number" min="1" max="365" value={reserveData.days} onChange={(e) => setReserveData({ ...reserveData, days: e.target.value })} onBlur={(e) => _setDays(e.target.value)} className="flex-1 text-center px-4 py-2.5 text-lg font-black text-slate-800 focus:outline-none" />
+                                  <button type="button" onClick={() => _setDays(_d + 1)} className="px-4 bg-gray-50 hover:bg-orange-50 text-slate-700 font-black text-lg transition-colors border-l border-gray-200" title="Artır">+</button>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5 mt-1">
+                                  {[3, 5, 7, 10, 15, 30].map(n => (
+                                      <button key={n} type="button" onClick={() => _setDays(n)} className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${_d === n ? 'bg-orange-500 text-white border-orange-500' : 'bg-white text-gray-600 border-gray-200 hover:border-orange-300 hover:text-orange-600'}`}>{n} gün</button>
+                                  ))}
+                              </div>
+                              <p className="text-[10px] text-gray-400 mt-1">Sistem, belirtilen gün dolduğunda odayı otomatik olarak tekrar boş konuma düşürür. <span className="font-bold text-orange-600">Bitiş: {_exp.toLocaleDateString('tr-TR')}</span></p>
+                          </div>
+                      );
+                  })()}
                </div>
                <div className="mt-8 flex justify-end gap-3"><button onClick={() => setIsReserveRoomModalOpen(false)} className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-6 py-2.5 rounded-xl font-bold transition-colors text-sm">İptal</button><button onClick={handleReserveRoom} disabled={!reserveData.name || !reserveData.phone || !reserveData.days} className="bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-2.5 rounded-xl font-bold text-sm transition-colors shadow-lg shadow-orange-500/30 flex items-center gap-2"><Check size={18} /> Rezerveyi Kaydet</button></div>
              </div>
