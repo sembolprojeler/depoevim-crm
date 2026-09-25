@@ -1046,6 +1046,16 @@ const reader = new FileReader();
                     <button onClick={() => setActiveMenu('musteri-ekle')} style={{animation:'depoBlink 1.5s infinite'}} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3 rounded-xl text-sm font-extrabold transition-colors shadow-lg shadow-indigo-500/40">
                         <Plus size={18} strokeWidth={3}/> Yeni Müşteri Ekle
                     </button>
+                    {/* YENİ: Sözleşme ıslak imza takip sayfasına gider. Rozet = "İmza Yok" işaretli dolu oda sayısı */}
+                    {(() => {
+                        const _unsignedCount = (rooms || []).filter(r => r.customerName && r.contractSigned === false).length;
+                        return (
+                            <button onClick={() => setActiveMenu('imzasiz-sozlesmeler')} className="flex items-center gap-2 bg-white border-2 border-rose-300 hover:bg-rose-50 text-rose-600 px-4 py-3 rounded-xl text-sm font-extrabold transition-colors shadow-sm">
+                                <FileTextIcon size={18}/> İmzası Olmayan Mevcut Müşteriler
+                                {_unsignedCount > 0 && <span className="bg-rose-500 text-white text-[11px] px-2 py-0.5 rounded-full font-black">{_unsignedCount}</span>}
+                            </button>
+                        );
+                    })()}
                 </div>
               </div>
 
