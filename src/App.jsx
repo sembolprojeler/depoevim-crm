@@ -1073,6 +1073,8 @@ const [firebaseUser, setFirebaseUser] = useState(null);
           { id: 'page-icra-odalari', label: 'İcra Odaları' },
           // YENİ: Hediye Verilen Odalar sayfası yetkisi
           { id: 'page-hediye-verilen-odalar', label: 'Hediye Verilen Odalar' },
+          // YENİ: Sözleşme ıslak imza takip sayfası
+          { id: 'page-imzasiz-sozlesmeler', label: 'İmzası Olmayan Mevcut Müşteriler' },
           { id: 'page-finans-rapor', label: 'Finans Rapor' },
           { id: 'page-depo-rapor', label: 'Depo Rapor' },
           { id: 'page-personel-rapor', label: 'Personel Rapor' },
@@ -1365,6 +1367,14 @@ const [firebaseUser, setFirebaseUser] = useState(null);
   // giftPageRange: 'busene' | 'gecensene' | 'all'  → hediye ayının denk geldiği takvim yılına göre süzer
   const [giftPageRange, setGiftPageRange] = useState('busene');
   const [giftPageSearch, setGiftPageSearch] = useState('');
+
+  // --- YENİ: SÖZLEŞME ISLAK İMZA TAKİP SAYFASI STATE'LERİ ---
+  // Oda kaydında contractSigned: true = imza var, false = imza yok, undefined = henüz işaretlenmedi
+  const [unsignedWhFilter, setUnsignedWhFilter] = useState('all');          // şube filtresi
+  const [unsignedStatusFilter, setUnsignedStatusFilter] = useState('unsigned'); // 'unsigned' | 'signed' | 'unknown' | 'all'
+  const [unsignedSearch, setUnsignedSearch] = useState('');
+  const [unsignedImporting, setUnsignedImporting] = useState(false);
+  const [unsignedImportResult, setUnsignedImportResult] = useState(null);   // toplu Excel yükleme özeti
 
   // --- GÜNÜ GELEN ODALAR STATE'LERİ ---
   const [dueRoomsDate, setDueRoomsDate] = useState(new Date().toISOString().split('T')[0]);
@@ -3406,6 +3416,99 @@ const handleSaveContractSettings = async () => {
       if (db && firebaseUser) {
           try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', String(roomId)), patch, { merge: true }); } catch (e) { console.error('İcra dosyası kaydetme hatası:', e); }
       }
+  };
+
+  // ============================================================================
+  // YENİ: SÖZLEŞME ISLAK İMZA TAKİBİ
+  // Oda bazlı tutulur (room.contractSigned). Hem oda detayındaki "Oda Sözleşmesi" kartından
+  // hem de "İmzası Olmayan Mevcut Müşteriler" sayfasından aynı fonksiyonla güncellenir → tam entegre.
+  // ============================================================================
+  const setRoomContractSigned = async (roomId, signed, source = 'Manuel') => {
+      const room = rooms.find(r => String(r.id) === String(roomId));
+      const patch = {
+          contractSigned: signed,                                   // true = imza var, false = imza yok
+          contractSignedAt: Date.now(),                             // son işaretleme zamanı
+          contractSignedBy: currentUserProfile?.name || 'Sistem',   // kim işaretledi
+          contractSignedSource: source                              // 'Manuel' | 'Excel'
+      };
+      await saveRoomLegalData(roomId, patch);
+      if (source === 'Manuel' && room) logActivity('Sözleşme İmza Durumu', `${room.name} odası (${room.customerName || '-'}) → ${signed ? 'İMZA VAR' : 'İMZA YOK'} olarak işaretlendi.`);
+  };
+
+  // XLSX kütüphanesini ihtiyaç anında yükler (musteri.jsx'teki yükleyiciyle aynı CDN)
+  const loadXLSXLib = () => new Promise((resolve, reject) => {
+      if (window.XLSX) return resolve(window.XLSX);
+      const sc = document.createElement('script');
+      sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+      sc.onload = () => resolve(window.XLSX); sc.onerror = reject; document.head.appendChild(sc);
+  });
+
+  // Türkçe duyarsız sadeleştirme (şube/oda adı eşleştirmede kullanılır)
+  const _foldTrKey = (v) => String(v || '').toLocaleUpperCase('tr').replace(/İ/g, 'I').replace(/Ş/g, 'S').replace(/Ğ/g, 'G').replace(/Ü/g, 'U').replace(/Ö/g, 'O').replace(/Ç/g, 'C').replace(/[^A-Z0-9]/g, '');
+
+  // TOPLU EXCEL YÜKLEME — Beklenen format (mevcut Excel dosyanızla birebir uyumlu):
+  //   • Her SAYFA bir şube (sayfa adı şube adını içermeli: "KARTAL ŞUBESİ", "ÇEKMEKÖY ŞUBE" ...)
+  //   • A sütunu: ODA NO (A-501 gibi). "A-BLOK" gibi blok başlık satırları ve boş satırlar atlanır.
+  //   • B sütunu: Müşteri adı yazıyorsa → İMZA YOK; "İMZASI VAR" yazıyorsa → İMZA VAR; "ODA BOŞ" → atlanır.
+  const importUnsignedContractsExcel = async (file) => {
+      if (!file) return;
+      setUnsignedImporting(true); setUnsignedImportResult(null);
+      try {
+          const XLSX = await loadXLSXLib();
+          const buf = await file.arrayBuffer();
+          const wb = XLSX.read(buf, { type: 'array' });
+          const result = { sheets: [], signed: 0, unsigned: 0, skippedEmpty: 0, notFound: [], unmatchedSheets: [] };
+          const patches = []; // { roomId, signed }
+          const roomKey = (name) => _foldTrKey(name);
+
+          wb.SheetNames.forEach(sheetName => {
+              const ws = wb.Sheets[sheetName];
+              const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+              // Sayfa adından şubeyi bul: şube adının ilk kelimesi sayfa adında geçiyorsa eşleşir
+              const sKey = _foldTrKey(sheetName);
+              const wh = warehouses.find(w => { const firstWord = _foldTrKey(String(w.name || '').split(/\s+/)[0]); return firstWord && sKey.includes(firstWord); });
+              if (!wh) { result.unmatchedSheets.push(sheetName); return; }
+              const whBlockIds = blocks.filter(b => b.warehouseId === wh.id).map(b => b.id);
+              const whRooms = rooms.filter(r => whBlockIds.includes(r.blockId));
+              let sSigned = 0, sUnsigned = 0, sNotFound = 0, sEmpty = 0;
+
+              rows.forEach((row, idx) => {
+                  if (idx < 2) return; // başlık satırları
+                  const rawRoom = row[0]; const rawVal = row[1];
+                  if (rawRoom === null || rawRoom === undefined || String(rawRoom).trim() === '') return;
+                  const roomStr = String(rawRoom).trim();
+                  if (_foldTrKey(roomStr).endsWith('BLOK')) return; // blok başlığı
+                  const valU = String(rawVal || '').trim().toLocaleUpperCase('tr');
+                  if (!valU || valU.includes('ODA BOŞ') || valU === 'BOŞ') { sEmpty++; return; }
+                  const signed = valU.replace(/\s+/g, ' ').includes('İMZASI VAR') || valU.includes('IMZASI VAR');
+                  const target = whRooms.find(r => roomKey(r.name) === roomKey(roomStr));
+                  if (!target) { sNotFound++; result.notFound.push(`${sheetName}: ${roomStr}`); return; }
+                  patches.push({ roomId: target.id, signed });
+                  if (signed) sSigned++; else sUnsigned++;
+              });
+              result.sheets.push({ name: sheetName, warehouse: wh.name, signed: sSigned, unsigned: sUnsigned, notFound: sNotFound, empty: sEmpty });
+              result.signed += sSigned; result.unsigned += sUnsigned; result.skippedEmpty += sEmpty;
+          });
+
+          // Tek seferde yerel state güncelle
+          const patchMap = new Map(patches.map(p => [String(p.roomId), p.signed]));
+          const stamp = { contractSignedAt: Date.now(), contractSignedBy: currentUserProfile?.name || 'Sistem', contractSignedSource: 'Excel' };
+          setRooms(prev => prev.map(r => patchMap.has(String(r.id)) ? { ...r, contractSigned: patchMap.get(String(r.id)), ...stamp } : r));
+          // Firestore'a parça parça yaz (yüzlerce oda olabilir; 25'lik gruplar halinde paralel)
+          if (db && firebaseUser) {
+              const list = Array.from(patchMap.entries());
+              for (let i = 0; i < list.length; i += 25) {
+                  await Promise.all(list.slice(i, i + 25).map(([rid, signed]) =>
+                      setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', String(rid)), { contractSigned: signed, ...stamp }, { merge: true }).catch(e => console.error('İmza toplu yazma hatası:', rid, e))
+                  ));
+              }
+          }
+          logActivity('Sözleşme İmza Toplu Yükleme', `Excel'den ${result.unsigned} oda İMZA YOK, ${result.signed} oda İMZA VAR olarak işaretlendi.`);
+          setUnsignedImportResult(result);
+      } catch (e) {
+          console.error('İmza Excel yükleme hatası:', e);
+          setUnsignedImportResult({ error: 'Dosya okunamadı. Lütfen .xlsx formatında ve beklenen düzende olduğundan emin olun.' });
+      } finally { setUnsignedImporting(false); }
   };
 
   // Süreç hareketi ekle/güncelle
@@ -8518,6 +8621,170 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                   </div>
               </div>
             </div>
+          ) : activeMenu === 'imzasiz-sozlesmeler' ? (
+            /* ============================================================
+               YENİ SAYFA: İMZASI OLMAYAN MEVCUT MÜŞTERİLER (SÖZLEŞME ISLAK İMZA TAKİBİ)
+               - Yalnızca DOLU odalar listelenir (boş odalar gösterilmez)
+               - Şube ve durum filtresi (İmza Yok / İmza Var / İşaretlenmemiş / Tümü) + arama
+               - Her satırda İmza Var / Yok işaretleme (oda detayındaki kartla aynı alan → tam entegre)
+               - Toplu Excel yükleme (mevcut Excel formatınızla uyumlu) + Excel'e aktarma
+               ============================================================ */
+            <div className="max-w-7xl mx-auto flex flex-col h-full animate-in fade-in duration-300">
+              {(() => {
+                  const fmt = (n) => Number(n || 0).toLocaleString('tr-TR', { maximumFractionDigits: 0 });
+                  // DOLU odalar + şube/blok/müşteri bilgisi
+                  const occupied = rooms.filter(r => r.customerName).map(room => {
+                      const block = blocks.find(b => b.id === room.blockId);
+                      const warehouse = warehouses.find(w => w.id === block?.warehouseId);
+                      const cust = customers.find(c => c.name === room.customerName);
+                      const status = room.contractSigned === true ? 'signed' : room.contractSigned === false ? 'unsigned' : 'unknown';
+                      return { room, block, warehouse, cust, status };
+                  });
+                  const byWh = occupied.filter(o => unsignedWhFilter === 'all' || String(o.warehouse?.id) === String(unsignedWhFilter));
+                  const cnt = { all: byWh.length, signed: byWh.filter(o => o.status === 'signed').length, unsigned: byWh.filter(o => o.status === 'unsigned').length, unknown: byWh.filter(o => o.status === 'unknown').length };
+                  const q = unsignedSearch.trim().toLocaleLowerCase('tr');
+                  const list = byWh
+                      .filter(o => unsignedStatusFilter === 'all' || o.status === unsignedStatusFilter)
+                      .filter(o => !q || String(o.room.name || '').toLocaleLowerCase('tr').includes(q) || String(o.room.customerName || '').toLocaleLowerCase('tr').includes(q))
+                      .sort((a, b) => String(a.warehouse?.name || '').localeCompare(String(b.warehouse?.name || ''), 'tr') || String(a.room.name || '').localeCompare(String(b.room.name || ''), 'tr', { numeric: true }));
+
+                  // Listeyi Excel'e aktar (aynı sütun düzeni: Şube | Oda No | Müşteri | Durum | Kira)
+                  const exportToExcel = async () => {
+                      try {
+                          const XLSX = await loadXLSXLib();
+                          const data = [['ŞUBE', 'ODA NO', 'MÜŞTERİ AD SOYAD', 'İMZA DURUMU', 'AYLIK KİRA', 'GİRİŞ TARİHİ']];
+                          list.forEach(o => data.push([o.warehouse?.name || '', o.room.name, o.room.customerName, o.status === 'signed' ? 'İMZASI VAR' : o.status === 'unsigned' ? 'İMZA YOK' : 'İŞARETLENMEDİ', Number(o.room.monthlyFee || 0), o.room.entryDate || '']));
+                          const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), 'Imza Takip');
+                          XLSX.writeFile(wb, `imza_takip_${new Date().toISOString().slice(0, 10)}.xlsx`);
+                      } catch (e) { console.error(e); }
+                  };
+
+                  // Tailwind sınıfları dinamik üretilemez (JIT purge); bu yüzden tam sınıf adları burada sabit yazılır
+                  const statusTabs = [
+                      ['unsigned', 'İmza Yok', 'bg-rose-500 border-rose-500 text-white shadow-md'],
+                      ['signed', 'İmza Var', 'bg-emerald-500 border-emerald-500 text-white shadow-md'],
+                      ['unknown', 'İşaretlenmemiş', 'bg-amber-500 border-amber-500 text-white shadow-md'],
+                      ['all', 'Tümü', 'bg-slate-700 border-slate-700 text-white shadow-md']
+                  ];
+
+                  return (
+                      <>
+                        {/* BAŞLIK */}
+                        <div className="mb-5 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+                          <div>
+                            <button onClick={() => setActiveMenu('tum-musteriler')} className="text-[11px] font-bold text-gray-400 hover:text-indigo-600 uppercase tracking-wider flex items-center gap-1 mb-1"><ArrowLeft size={12} /> Müşteri Listesi</button>
+                            <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2"><Shield size={24} className="text-rose-500" /> İmzası Olmayan Mevcut Müşteriler</h2>
+                            <p className="text-sm text-gray-500 mt-1">Dolu odaların sözleşme ıslak imza takibi. Buradaki işaretleme oda detayındaki "Oda Sözleşmesi" kartıyla senkrondur.</p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {/* TOPLU EXCEL YÜKLE */}
+                            <label className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold cursor-pointer transition-colors shadow-sm ${unsignedImporting ? 'bg-gray-200 text-gray-500 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}`}>
+                              <Upload size={16} /> {unsignedImporting ? 'Yükleniyor...' : 'Excel ile Toplu Yükle'}
+                              <input type="file" accept=".xlsx,.xls" className="hidden" disabled={unsignedImporting} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; importUnsignedContractsExcel(f); }} />
+                            </label>
+                            <button onClick={exportToExcel} className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold bg-white border border-gray-200 hover:border-emerald-300 hover:text-emerald-700 text-gray-700 transition-colors shadow-sm"><Download size={16} /> Excel'e Aktar</button>
+                          </div>
+                        </div>
+
+                        {/* EXCEL FORMAT BİLGİSİ + YÜKLEME SONUCU */}
+                        <div className="mb-4 rounded-xl border border-indigo-100 bg-indigo-50/60 p-3 text-[11px] text-indigo-800 flex items-start gap-2">
+                          <Info size={14} className="shrink-0 mt-0.5" />
+                          <div>
+                            <span className="font-bold">Excel formatı:</span> Her sayfa bir şube (sayfa adı şube adını içermeli). A sütunu <b>ODA NO</b>, B sütunu <b>MÜŞTERİ AD SOYAD</b>.
+                            B sütununda isim yazıyorsa → <b>İmza Yok</b>, <b>"İMZASI VAR"</b> yazıyorsa → İmza Var, <b>"ODA BOŞ"</b> ve blok başlıkları atlanır. Mevcut Excel dosyanız bu düzendedir; olduğu gibi yükleyebilirsiniz.
+                          </div>
+                        </div>
+                        {unsignedImportResult && (
+                          <div className={`mb-4 rounded-xl border p-4 ${unsignedImportResult.error ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="text-sm">
+                                {unsignedImportResult.error ? (
+                                  <span className="font-bold text-rose-700">{unsignedImportResult.error}</span>
+                                ) : (
+                                  <>
+                                    <div className="font-bold text-emerald-800 mb-1">Yükleme tamamlandı: <span className="text-rose-600">{unsignedImportResult.unsigned} oda İmza Yok</span>, <span className="text-emerald-600">{unsignedImportResult.signed} oda İmza Var</span> olarak işaretlendi. {unsignedImportResult.skippedEmpty} boş oda atlandı.</div>
+                                    <div className="flex flex-wrap gap-1.5 mt-1">
+                                      {unsignedImportResult.sheets.map(sh => <span key={sh.name} className="text-[10px] font-bold bg-white border border-emerald-200 text-emerald-800 px-2 py-0.5 rounded">{sh.name} → {sh.warehouse}: {sh.unsigned} yok / {sh.signed} var{sh.notFound ? ` / ${sh.notFound} bulunamadı` : ''}</span>)}
+                                    </div>
+                                    {unsignedImportResult.unmatchedSheets.length > 0 && <div className="text-[11px] text-amber-700 font-bold mt-1.5">⚠ Şubeyle eşleşmeyen sayfalar (atlandı): {unsignedImportResult.unmatchedSheets.join(', ')}</div>}
+                                    {unsignedImportResult.notFound.length > 0 && (
+                                      <details className="mt-1.5"><summary className="text-[11px] text-amber-700 font-bold cursor-pointer">⚠ Sistemde bulunamayan {unsignedImportResult.notFound.length} oda (göster)</summary><div className="text-[10px] text-gray-600 mt-1 max-h-24 overflow-y-auto">{unsignedImportResult.notFound.join(' • ')}</div></details>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                              <button onClick={() => setUnsignedImportResult(null)} className="text-gray-400 hover:text-gray-600 shrink-0"><X size={16} /></button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* ÖZET KARTLAR (tıklanınca durum filtresi olur) */}
+                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                          {statusTabs.map(([val, label, activeCls]) => (
+                            <button key={val} onClick={() => setUnsignedStatusFilter(val)} className={`text-left rounded-xl border px-4 py-3 transition-all ${unsignedStatusFilter === val ? activeCls : 'bg-white border-gray-100 text-slate-700 hover:border-gray-300'}`}>
+                              <p className={`text-[10px] font-bold uppercase tracking-wider ${unsignedStatusFilter === val ? 'text-white/80' : 'text-gray-400'}`}>{label}</p>
+                              <p className="text-2xl font-black">{cnt[val]}</p>
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* ŞUBE FİLTRESİ + ARAMA */}
+                        <div className="flex flex-col sm:flex-row gap-3 mb-4">
+                          <select value={unsignedWhFilter} onChange={(e) => setUnsignedWhFilter(e.target.value)} className="border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-bold bg-white shadow-sm focus:outline-none focus:border-indigo-400 cursor-pointer">
+                            <option value="all">Tüm Şubeler</option>
+                            {warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                          </select>
+                          <div className="relative flex-1">
+                            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Search size={16} className="text-gray-400" /></div>
+                            <input type="text" value={unsignedSearch} onChange={(e) => setUnsignedSearch(e.target.value)} placeholder="Oda veya müşteri ara..." className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400 shadow-sm font-medium" />
+                          </div>
+                        </div>
+
+                        {/* LİSTE */}
+                        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                          <div className="px-4 py-2.5 bg-slate-50 border-b border-gray-100 flex items-center justify-between">
+                            <span className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Dolu Odalar</span>
+                            <span className="text-[11px] font-black text-slate-700">{list.length} kayıt</span>
+                          </div>
+                          {list.length === 0 ? (
+                            <div className="p-10 text-center"><Shield size={32} className="text-gray-200 mx-auto mb-2" /><p className="text-sm font-bold text-gray-400">Bu filtrede kayıt bulunamadı.</p></div>
+                          ) : (
+                            <div className="divide-y divide-gray-100 max-h-[65vh] overflow-y-auto">
+                              {list.map(o => (
+                                <div key={o.room.id} className={`px-3 py-2.5 flex items-center gap-3 transition-colors ${o.status === 'unsigned' ? 'hover:bg-rose-50/30' : o.status === 'signed' ? 'hover:bg-emerald-50/30' : 'hover:bg-amber-50/30'}`}>
+                                  {/* Durum işareti */}
+                                  <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 border ${o.status === 'signed' ? 'bg-emerald-100 text-emerald-600 border-emerald-200' : o.status === 'unsigned' ? 'bg-rose-100 text-rose-600 border-rose-200' : 'bg-amber-100 text-amber-600 border-amber-200'}`}>
+                                    {o.status === 'signed' ? <Check size={16} strokeWidth={3} /> : o.status === 'unsigned' ? <X size={16} strokeWidth={3} /> : <AlertCircle size={16} />}
+                                  </div>
+                                  {/* Oda + müşteri */}
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1.5 flex-wrap leading-tight">
+                                      <span className="font-bold text-slate-800 text-[13px]">{o.room.name}</span>
+                                      <span className="text-gray-300 text-[11px]">•</span>
+                                      <button onClick={() => { if (o.cust) { setActiveMenu('tum-musteriler'); setSelectedCustomerId(o.cust.id); setSelectedRoomId(null); } }} className={`text-[12px] font-bold truncate max-w-[160px] sm:max-w-none ${o.cust ? 'text-indigo-600 hover:underline' : 'text-gray-600 cursor-default'}`}>{o.room.customerName}</button>
+                                    </div>
+                                    <div className="text-[10px] text-gray-500 font-bold mt-0.5 flex items-center gap-1.5 flex-wrap leading-tight">
+                                      <span>{o.warehouse?.name || '-'}</span><span className="text-gray-300">•</span>
+                                      <span>{o.block?.name || '-'}</span><span className="text-gray-300">•</span>
+                                      <span>{fmt(o.room.monthlyFee)} TL</span>
+                                      {o.room.contractSignedAt && <><span className="text-gray-300">•</span><span className="text-gray-400 font-medium">{o.room.contractSignedBy} • {new Date(o.room.contractSignedAt).toLocaleDateString('tr-TR')}{o.room.contractSignedSource === 'Excel' ? ' (Excel)' : ''}</span></>}
+                                    </div>
+                                  </div>
+                                  {/* İmza Var / Yok işaretleme + Odaya Git */}
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <button onClick={() => setRoomContractSigned(o.room.id, true)} title="İmza Var" className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold border transition-colors ${o.status === 'signed' ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-white text-gray-500 border-gray-200 hover:border-emerald-300 hover:text-emerald-600'}`}>Var</button>
+                                    <button onClick={() => setRoomContractSigned(o.room.id, false)} title="İmza Yok" className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold border transition-colors ${o.status === 'unsigned' ? 'bg-rose-500 text-white border-rose-500' : 'bg-white text-gray-500 border-gray-200 hover:border-rose-300 hover:text-rose-600'}`}>Yok</button>
+                                    <button onClick={() => { setActiveMenu('depo'); setSelectedWarehouseId(o.warehouse?.id); setSelectedBlockId(o.room.blockId); setSelectedRoomId(o.room.id); setSelectedCustomerId(null); }} title="Odaya Git" className="p-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white transition-colors"><Box size={14} /></button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                  );
+              })()}
+            </div>
           ) : activeMenu === 'hediye-verilen-odalar' ? (
             /* ============================================================
                YENİ SAYFA: HEDİYE VERİLEN ODALAR
@@ -8890,6 +9157,28 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                                          </div>
                                        );
                                    })()}
+                                   {/* YENİ: SÖZLEŞME ISLAK İMZA DURUMU — "İmzası Olmayan Mevcut Müşteriler" sayfasıyla aynı alanı
+                                       (room.contractSigned) kullanır; burada işaretlenen orada, orada işaretlenen burada anında görünür. */}
+                                   <div className="mt-2 pt-2 border-t border-violet-100">
+                                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                                         <div className="text-[10px] font-bold text-violet-400 uppercase tracking-wider">Islak İmza Durumu</div>
+                                         <div className="flex gap-1">
+                                            <button onClick={() => setRoomContractSigned(selectedRoomDetail.id, true)} title="Sözleşmede ıslak imza var"
+                                               className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-colors ${selectedRoomDetail?.contractSigned === true ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm' : 'bg-white text-gray-500 border-gray-200 hover:border-emerald-300 hover:text-emerald-600'}`}>
+                                               <Check size={11} strokeWidth={3} /> İmza Var
+                                            </button>
+                                            <button onClick={() => setRoomContractSigned(selectedRoomDetail.id, false)} title="Sözleşmede ıslak imza YOK"
+                                               className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-colors ${selectedRoomDetail?.contractSigned === false ? 'bg-rose-500 text-white border-rose-500 shadow-sm' : 'bg-white text-gray-500 border-gray-200 hover:border-rose-300 hover:text-rose-600'}`}>
+                                               <X size={11} strokeWidth={3} /> İmza Yok
+                                            </button>
+                                         </div>
+                                      </div>
+                                      {selectedRoomDetail?.contractSigned === undefined || selectedRoomDetail?.contractSigned === null ? (
+                                         <p className="text-[9px] text-amber-600 font-bold mt-1">⚠ Henüz işaretlenmedi</p>
+                                      ) : (
+                                         <p className="text-[9px] text-gray-400 mt-1">{selectedRoomDetail.contractSignedBy || '-'} • {selectedRoomDetail.contractSignedAt ? new Date(selectedRoomDetail.contractSignedAt).toLocaleDateString('tr-TR') : ''}{selectedRoomDetail.contractSignedSource === 'Excel' ? ' • Excel' : ''}</p>
+                                      )}
+                                   </div>
                                 </div>
                               )}
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
