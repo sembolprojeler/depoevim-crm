@@ -8759,7 +8759,8 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                                   {/* Oda + müşteri */}
                                   <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-1.5 flex-wrap leading-tight">
-                                      <span className="font-bold text-slate-800 text-[13px]">{o.room.name}</span>
+                                      {/* GÜNCELLENDİ: Oda numarasına tıklayınca doğrudan oda detayına gider (sağdaki kutu butonuyla aynı) */}
+                                      <button onClick={() => { setActiveMenu('depo'); setSelectedWarehouseId(o.warehouse?.id); setSelectedBlockId(o.room.blockId); setSelectedRoomId(o.room.id); setSelectedCustomerId(null); }} title="Odaya Git" className="font-bold text-slate-800 text-[13px] hover:text-indigo-600 hover:underline cursor-pointer">{o.room.name}</button>
                                       <span className="text-gray-300 text-[11px]">•</span>
                                       <button onClick={() => { if (o.cust) { setActiveMenu('tum-musteriler'); setSelectedCustomerId(o.cust.id); setSelectedRoomId(null); } }} className={`text-[12px] font-bold truncate max-w-[160px] sm:max-w-none ${o.cust ? 'text-indigo-600 hover:underline' : 'text-gray-600 cursor-default'}`}>{o.room.customerName}</button>
                                     </div>
