@@ -127,10 +127,32 @@ const appId = typeof __app_id !== 'undefined' ? __app_id : 'depoevim-crm';
 // Hediye artık her zaman İLK aylardan değil, hediyenin verildiği SÖZLEŞME YILININ
 // ilk aylarından başlar. giftStartMonthIndex hediye verilirken kaydedilir
 // (örn. 3. yıl dolduysa 36). Eski kayıtlarda bu alan yoktur (0) → eski davranış korunur.
+// YENİ (ÇOKLU KAMPANYA): Odanın TÜM hediye aralıklarını tek listede döndürür.
+//  • Eski tekil hediye: giftMonths + giftStartMonthIndex (mevcut "Hediye Ay Ver" butonu) → korunur
+//  • Kampanya hediyeleri: giftCampaigns = [{ id, name, startIndex, months, createdAt, createdBy }]
+//    Aynı müşteri farklı kampanyalarda birden fazla kez hediye alabilir; her kampanya ayrı aralıktır.
+const getGiftRanges = (roomLike) => {
+    if (!roomLike) return [];
+    const ranges = [];
+    if (Number(roomLike.giftMonths) > 0) {
+        ranges.push({ id: 'legacy', name: 'Hediye Ay', start: Number(roomLike.giftStartMonthIndex || 0), months: Number(roomLike.giftMonths) });
+    }
+    (Array.isArray(roomLike.giftCampaigns) ? roomLike.giftCampaigns : []).forEach(c => {
+        if (c && Number(c.months) > 0) ranges.push({ id: c.id, name: c.name || 'Kampanya', start: Number(c.startIndex || 0), months: Number(c.months) });
+    });
+    return ranges;
+};
+
+// Odaya verilen TOPLAM hediye ay sayısı (tekil + tüm kampanyalar)
+const getTotalGiftMonths = (roomLike) => getGiftRanges(roomLike).reduce((s, g) => s + g.months, 0);
+
+// Hediye döneminin bittiği ay sayacı (döngülerin gelecekteki hediye aylarını da görmesi için)
+const getGiftEndIndex = (roomLike) => getGiftRanges(roomLike).reduce((m, g) => Math.max(m, g.start + g.months), 0);
+
+// GÜNCELLENDİ: Bu ay herhangi bir hediye aralığına (tekil VEYA kampanya) giriyor mu?
+// İmza değişmedi → tüm mevcut çağrı noktaları (ledger, oda dökümü, raporlar) otomatik olarak kampanyaları da tanır.
 const isGiftedMonth = (roomLike, monthCounter) => {
-    if (!roomLike || !roomLike.giftMonths) return false;
-    const start = Number(roomLike.giftStartMonthIndex || 0);
-    return monthCounter >= start && monthCounter < start + Number(roomLike.giftMonths);
+    return getGiftRanges(roomLike).some(g => monthCounter >= g.start && monthCounter < g.start + g.months);
 };
 
 // ============================================================================
@@ -3638,6 +3660,9 @@ const [isPastIncreaseModalOpen, setIsPastIncreaseModalOpen] = useState(false);
   // YENİ: Hediyenin BAŞLAYACAĞI ay ('YYYY-AyIndex'). Varsayılan: içinde bulunulan ay.
   // Böylece "Hediye Ay Ver" butonu, sözleşme yılının başına değil, SEÇİLEN AYA hediye uygular.
   const [giftStartMonthKey, setGiftStartMonthKey] = useState(`${new Date().getFullYear()}-${new Date().getMonth()}`);
+  // YENİ: KAMPANYA HEDİYELERİ modalı (aynı odaya birden fazla, ayrı ayrı hediye kampanyası)
+  const [isGiftCampaignModalOpen, setIsGiftCampaignModalOpen] = useState(false);
+  const [giftCampaignForm, setGiftCampaignForm] = useState({ name: '', startKey: `${new Date().getFullYear()}-${new Date().getMonth()}`, months: 1 });
   const [giftMonthValue, setGiftMonthValue] = useState(1);
 
   // --- ÜCRETSİZ ODA STATE'LERİ ---
@@ -3985,6 +4010,70 @@ const handleEntryExitSave = async () => {
       }
 
       setIsGiftModalOpen(false);
+  };
+
+  // ============================================================================
+  // YENİ: KAMPANYA HEDİYELERİ (ÇOKLU)
+  // Her kampanya ayrı kayıttır: { id, name, startIndex, months, createdAt, createdBy }.
+  // startIndex, mevcut tekil hediyeyle BİREBİR aynı çıpadan (ödeme tarihi, yoksa giriş) hesaplanır,
+  // böylece cari/ledger/oda dökümü/raporlar isGiftedMonth üzerinden kampanyaları otomatik tanır.
+  // ============================================================================
+  const _giftAnchorIdx = (room) => {
+      const _entryD = parseDateLocal(room.entryDate || '2026-01-01');
+      const _anchorD = room.paymentDate && String(room.paymentDate).includes('-') ? parseDateLocal(room.paymentDate) : _entryD;
+      return _anchorD.getFullYear() * 12 + _anchorD.getMonth();
+  };
+
+  // Hediye kapsamına giren aylarda carideki eski borç override'larını temizler (tekil hediyedeki mantığın aynısı)
+  const _cleanGiftOverrides = async (room, startIndex, months) => {
+      const cust = customers.find(c => c.name === room?.customerName);
+      if (!cust || months <= 0) return;
+      const prefix = `debt-${room.id}-`;
+      const absStart = _giftAnchorIdx(room) + startIndex;
+      const keys = new Set();
+      for (let i = 0; i < months; i++) { const idx = absStart + i; keys.add(`${prefix}${Math.floor(idx / 12)}-${idx % 12}`); }
+      const cleaned = (cust.ledgerOverrides || []).filter(o => !(o && keys.has(o.txId)));
+      if (cleaned.length === (cust.ledgerOverrides || []).length) return;
+      setCustomers(prev => prev.map(c => c.id === cust.id ? { ...c, ledgerOverrides: cleaned } : c));
+      if (db && firebaseUser) {
+          try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'customers', String(cust.id)), { ledgerOverrides: cleaned }, { merge: true }); } catch (e) { console.error('Kampanya hediye cari temizleme hatası:', e); }
+      }
+  };
+
+  const handleAddGiftCampaign = async () => {
+      const room = rooms.find(r => String(r.id) === String(selectedRoomId));
+      if (!room) return;
+      const months = Math.max(1, parseInt(giftCampaignForm.months) || 1);
+      const [y, m] = String(giftCampaignForm.startKey).split('-').map(Number);
+      const startIndex = Math.max(0, (y * 12 + m) - _giftAnchorIdx(room)); // girişten önceki aya verilemez
+      const campaign = {
+          id: 'gc_' + Date.now(),
+          name: String(giftCampaignForm.name || '').trim() || 'Kampanya',
+          startIndex, months,
+          createdAt: Date.now(),
+          createdBy: currentUserProfile?.name || 'Sistem'
+      };
+      const next = [...(room.giftCampaigns || []), campaign];
+      setRooms(prev => prev.map(r => String(r.id) === String(room.id) ? { ...r, giftCampaigns: next } : r));
+      if (db && firebaseUser) {
+          try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', String(room.id)), { giftCampaigns: next }, { merge: true }); } catch (e) { console.error('Kampanya hediye kaydetme hatası:', e); }
+      }
+      await _cleanGiftOverrides(room, startIndex, months);
+      logActivity('Kampanya Hediyesi', `${room.name} (${room.customerName || '-'}) → "${campaign.name}" kampanyası: ${months} ay hediye eklendi.`);
+      setGiftCampaignForm({ name: '', startKey: `${new Date().getFullYear()}-${new Date().getMonth()}`, months: 1 });
+  };
+
+  const handleRemoveGiftCampaign = async (campaignId) => {
+      const room = rooms.find(r => String(r.id) === String(selectedRoomId));
+      if (!room) return;
+      const target = (room.giftCampaigns || []).find(c => c.id === campaignId);
+      if (!target || !window.confirm(`"${target.name}" kampanyasına ait ${target.months} ay hediye kaldırılsın mı? Bu aylar tekrar borçlandırılır.`)) return;
+      const next = (room.giftCampaigns || []).filter(c => c.id !== campaignId);
+      setRooms(prev => prev.map(r => String(r.id) === String(room.id) ? { ...r, giftCampaigns: next } : r));
+      if (db && firebaseUser) {
+          try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', String(room.id)), { giftCampaigns: next }, { merge: true }); } catch (e) { console.error('Kampanya hediye silme hatası:', e); }
+      }
+      logActivity('Kampanya Hediyesi Kaldırıldı', `${room.name} → "${target.name}" (${target.months} ay) kaldırıldı.`);
   };
 
   const handleSetFreeRoom = async () => {
@@ -4402,6 +4491,7 @@ const handleRentRoom = async () => {
           entryPhotoBy: rentData.entryPhoto ? currentUserProfile.name : null,
           paidMonths: [],
           rentedBy: currentUserProfile.name,
+          rentedAt: Date.now(),   // YENİ: Odanın sistemde AÇILDIĞI an (saat bilgisi için). entryDate sözleşme giriş günüdür, değişmez.
           isReserved: false, // Varsa rezerveyi iptal et
           reservedName: null,
           reservedPhone: null,
@@ -4749,7 +4839,7 @@ const handleEndRentConfirm = async () => {
       const customerRoomHistory = customerToUpdate ? [historyRecord, ...(customerToUpdate.roomHistory || [])] : null;
 
       const roomUpdates = {
-          customerName: null, entryDate: null, paymentDate: null, monthlyFee: null, sealNo: null, broughtBy: 'kendisi', teamList: null, hasDamage: false, damageDescription: null, transportPrice: null, transportHasKdv: false, entryPhoto: null, entryPhotos: null, entryExitHistory: null, movedFrom: null, paidMonths: [], isFreeRoom: false, freeRoomReason: null, giftMonths: 0, 
+          customerName: null, entryDate: null, paymentDate: null, monthlyFee: null, sealNo: null, broughtBy: 'kendisi', teamList: null, hasDamage: false, damageDescription: null, transportPrice: null, transportHasKdv: false, entryPhoto: null, entryPhotos: null, entryExitHistory: null, movedFrom: null, paidMonths: [], isFreeRoom: false, freeRoomReason: null, giftMonths: 0, giftCampaigns: [], 
           history: [historyRecord, ...(room.history || [])]
       };
 
@@ -4882,7 +4972,7 @@ const handleChangeRoomConfirm = async () => {
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', String(oldRoom.id)), {
                     customerName: null, entryDate: null, paymentDate: null, monthlyFee: null, sealNo: null,
                     broughtBy: 'kendisi', teamList: null, hasDamage: false, damageDescription: null, transportPrice: null, transportHasKdv: false, entryPhoto: null, entryPhotos: null, entryExitHistory: null, movedFrom: null,
-                    paidMonths: [], isFreeRoom: false, freeRoomReason: null, giftMonths: 0,
+                    paidMonths: [], isFreeRoom: false, freeRoomReason: null, giftMonths: 0, giftCampaigns: [],
                     history: [historyRecord, ...(oldRoom.history || [])]
                 }, { merge: true });
 
@@ -4910,6 +5000,8 @@ const handleChangeRoomConfirm = async () => {
                     isFreeRoom: oldRoom.isFreeRoom || false,
                     freeRoomReason: oldRoom.freeRoomReason || null,
                     giftMonths: oldRoom.giftMonths || 0,
+                    giftStartMonthIndex: oldRoom.giftStartMonthIndex || 0,
+                    giftCampaigns: oldRoom.giftCampaigns || [],   // YENİ: kampanya hediyeleri de yeni odaya taşınır
                     increaseHistory: oldRoom.increaseHistory || null,
                     priceHistory: oldRoom.priceHistory || null
                 }, { merge: true });
@@ -5020,7 +5112,7 @@ const handleChangeRoomConfirm = async () => {
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', String(oldRoom.id)), {
                     customerName: null, entryDate: null, paymentDate: null, monthlyFee: null, sealNo: null,
                     broughtBy: 'kendisi', teamList: null, hasDamage: false, damageDescription: null, transportPrice: null, transportHasKdv: false, entryPhoto: null, entryPhotos: null, entryExitHistory: null, movedFrom: null,
-                    paidMonths: [], isFreeRoom: false, freeRoomReason: null, giftMonths: 0,
+                    paidMonths: [], isFreeRoom: false, freeRoomReason: null, giftMonths: 0, giftCampaigns: [],
                     history: [historyRecord, ...(oldRoom.history || [])]
                 }, { merge: true });
 
@@ -5039,10 +5131,11 @@ const handleChangeRoomConfirm = async () => {
                     entryPhoto: null, entryPhotos: null, entryExitHistory: null,
                     paidMonths: [],
                     rentedBy: currentUserProfile.name,
+                    rentedAt: Date.now(),   // YENİ: Yeni odanın açılış anı
                     movedFrom: oldRoom.name || null,
                     isReserved: false, reservedName: null, reservedPhone: null, reserveExpiry: null, reserveExpiryTimestamp: null,
                     isFreeRoom: false, freeRoomReason: null,
-                    giftMonths: 0, giftStartMonthIndex: 0,
+                    giftMonths: 0, giftStartMonthIndex: 0, giftCampaigns: [],
                     increaseHistory: null, priceHistory: null
                 }, { merge: true });
 
@@ -6356,7 +6449,8 @@ if (isDueYet && !selectedRoomDetail.paidMonths?.includes(key) && !isGifted && !i
 
               // YENİ: Hediye ayları vadesi gelmese bile cariye/ekstreye 0 TL olarak eklensin diye,
               // döngü hediye döneminin sonuna kadar da ilerler (oda dökümündeki davranışla aynı).
-              const giftEndIndex = Number(room.giftMonths) > 0 ? (Number(room.giftStartMonthIndex || 0) + Number(room.giftMonths)) : 0;
+              // GÜNCELLENDİ: Tekil hediye + TÜM kampanya hediyelerinin en son bittiği ay
+              const giftEndIndex = getGiftEndIndex(room);
 
               // Bugüne kadar olan ayları (ve varsa gelecekteki hediye aylarını) tara
               while ((loopDate.getFullYear() < calculationEndDate.getFullYear() || (loopDate.getFullYear() === calculationEndDate.getFullYear() && loopDate.getMonth() <= calculationEndDate.getMonth())) || monthCounter < giftEndIndex) {
@@ -8811,7 +8905,9 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                   // Her oda için hediye aylarının takvim tarihleri hesaplanır (giriş/ödeme çapasından
                   // giftStartMonthIndex + k ay sonrası). Filtreye uyan aylar satırda gösterilir.
                   const giftRooms = rooms.map(room => {
-                      const gm = Number(room.giftMonths || 0);
+                      // GÜNCELLENDİ: Tekil hediye + TÜM kampanya hediyeleri birlikte sayılır
+                      const _ranges = getGiftRanges(room);
+                      const gm = getTotalGiftMonths(room);
                       if (gm <= 0 || !room.entryDate) return null;
                       const entryD = parseAnyDate(room.entryDate);
                       if (!entryD) return null;
@@ -8822,16 +8918,21 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
 
                       const giftMonthsList = [];
                       let rangeValue = 0; // filtreye uyan hediye aylarının kira karşılığı (KDV dahil)
-                      for (let k = 0; k < gm; k++) {
-                          const mc = startIdx + k;
+                      // Her hediye aralığı (tekil / kampanya) ayrı ayrı gezilir; ay etiketinde kampanya adı da tutulur
+                      void startIdx; // (tekil başlangıç artık _ranges içinde)
+                      _ranges.forEach(g => {
+                        for (let k = 0; k < g.months; k++) {
+                          const mc = g.start + k;
                           // new Date(yıl, ay + mc, 1) → ay taşması JS tarafından otomatik yönetilir (yıl geçişi güvenli)
                           const giftDate = new Date(anchorD.getFullYear(), anchorD.getMonth() + mc, 1);
                           if (!inGiftRange(giftDate)) continue;
                           const base = Number(getRoomFeeForMonth(room, giftDate.getFullYear(), giftDate.getMonth()) || room.monthlyFee || 0);
                           const total = hasKdv ? base * 1.20 : base;
                           rangeValue += total;
-                          giftMonthsList.push({ label: `${monthNames[giftDate.getMonth()]} ${giftDate.getFullYear()}`, amount: total, dateObj: giftDate });
-                      }
+                          giftMonthsList.push({ label: `${monthNames[giftDate.getMonth()]} ${giftDate.getFullYear()}`, amount: total, dateObj: giftDate, campaign: g.id === 'legacy' ? null : g.name });
+                        }
+                      });
+                      giftMonthsList.sort((a, b) => a.dateObj - b.dateObj);
                       if (giftMonthsList.length === 0) return null; // bu odanın hediyesi seçili döneme denk gelmiyor
 
                       const block = blocks.find(b => b.id === room.blockId);
@@ -8945,8 +9046,8 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                                                 {/* HEDİYE AYLARI — hangi aylar hediye kullanıldı (kompakt etiketler) */}
                                                 <div className="flex flex-wrap gap-1 mt-1">
                                                     {g.giftMonthsList.map((m, i) => (
-                                                        <span key={i} className="text-[9px] font-bold bg-pink-50 text-pink-700 border border-pink-100 px-1.5 py-0.5 rounded">
-                                                            {m.label}
+                                                        <span key={i} title={m.campaign ? `Kampanya: ${m.campaign}` : 'Hediye Ay'} className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${m.campaign ? 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-100' : 'bg-pink-50 text-pink-700 border-pink-100'}`}>
+                                                            {m.label}{m.campaign ? ` • ${m.campaign}` : ''}
                                                         </span>
                                                     ))}
                                                 </div>
@@ -9455,7 +9556,7 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                              {/* BLOK 3 - MUHASEBE İŞLEMLERİ (alt): Ücretsiz Oda + Hediye Ay Ver */}
                              <div>
                                <h4 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-3 ml-1">Muhasebe İşlemleri</h4>
-                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                  {selectedRoomDetail?.isFreeRoom ? (
                                     <div className="flex flex-col items-center justify-center gap-1.5 py-4 px-2 rounded-2xl bg-cyan-100 border border-cyan-200 text-cyan-700 font-bold text-xs">
                                        <div className="w-10 h-10 rounded-xl bg-cyan-500 text-white flex items-center justify-center shadow-sm"><Gift size={18}/></div>
@@ -9480,6 +9581,19 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                                        <span className="text-center leading-tight">Hediye Ay Ver</span>
                                     </button>
                                  )}
+                                 {/* YENİ: KAMPANYA HEDİYELERİ — aynı odaya ayrı kampanyalarla birden fazla hediye ay girilebilir */}
+                                 {(() => {
+                                    const _camps = selectedRoomDetail?.giftCampaigns || [];
+                                    const _campMonths = _camps.reduce((s, c) => s + Number(c.months || 0), 0);
+                                    return (
+                                      <button onClick={() => { if(!checkActionPerm('action-hediye-ay')) return; setGiftCampaignForm({ name: '', startKey: `${new Date().getFullYear()}-${new Date().getMonth()}`, months: 1 }); setIsGiftCampaignModalOpen(true); }}
+                                         className={`group flex flex-col items-center justify-center gap-2 py-4 px-2 rounded-2xl border font-bold text-xs transition-all hover:-translate-y-0.5 hover:shadow-md ${_camps.length > 0 ? 'bg-fuchsia-100 border-fuchsia-200 text-fuchsia-700' : 'bg-fuchsia-50 hover:bg-fuchsia-100 border-fuchsia-100 text-fuchsia-700'}`}>
+                                         <div className="w-10 h-10 rounded-xl bg-fuchsia-500 text-white flex items-center justify-center shadow-sm shadow-fuchsia-500/30 group-hover:scale-110 transition-transform"><Gift size={18}/></div>
+                                         <span className="text-center leading-tight">Kampanya Hediyeleri</span>
+                                         {_camps.length > 0 && <span className="text-[10px] font-black bg-fuchsia-500 text-white px-2 py-0.5 rounded-full">{_camps.length} kampanya • {_campMonths} ay</span>}
+                                      </button>
+                                    );
+                                 })()}
                                </div>
                              </div>
                            </div>
@@ -9503,7 +9617,7 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                                    {selectedRoomDetail?.priceHistory && selectedRoomDetail.priceHistory.length > 0 && (
                                        <button onClick={() => setIsPriceHistoryModalOpen(true)} className="text-xs bg-indigo-50 text-indigo-600 hover:bg-indigo-100 px-3 py-1.5 rounded-lg font-bold border border-indigo-200 transition-colors flex items-center gap-1.5"><TrendingUp size={14}/> Zam Geçmişi</button>
                                    )}
-                                   <span className="text-xs text-gray-400 bg-gray-100 px-3 py-1.5 rounded-lg">Giriş: {selectedRoomDetail?.entryDate || '01.01.2026'}</span>
+                                   <span className="text-xs text-gray-400 bg-gray-100 px-3 py-1.5 rounded-lg" title={selectedRoomDetail?.rentedAt ? `Sistemde açılış: ${new Date(selectedRoomDetail.rentedAt).toLocaleString('tr-TR')}${selectedRoomDetail.rentedBy ? ' • ' + selectedRoomDetail.rentedBy : ''}` : ''}>Giriş: {selectedRoomDetail?.entryDate || '01.01.2026'}{/* YENİ: Açılış saati (yalnızca bu özellikten sonra açılan odalarda) */}{selectedRoomDetail?.rentedAt ? <span className="font-bold text-gray-500"> • {new Date(selectedRoomDetail.rentedAt).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}</span> : null}</span>
                                </div>
                            </div>
                            
@@ -10965,7 +11079,7 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
                    <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center font-bold text-lg">{selectedRoomDetail?.customerName?.charAt(0) || 'M'}</div>
                    <div>
                        <h4 className="font-bold text-gray-800 text-[15px] leading-tight">{selectedRoomDetail?.customerName}</h4>
-                       <span className="text-[11px] text-gray-500 font-medium">İlk Giriş: {selectedRoomDetail?.entryDate}</span>
+                       <span className="text-[11px] text-gray-500 font-medium">İlk Giriş: {selectedRoomDetail?.entryDate}{selectedRoomDetail?.rentedAt ? ` • ${new Date(selectedRoomDetail.rentedAt).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}` : ''}</span>
                    </div>
                </div>
                
@@ -11193,6 +11307,108 @@ const getWarehouseOccupiedM3 = (warehouseId) => {
       )}
 
       {/* HEDİYE AY VER MODALI */}
+      {/* ============================================================
+          YENİ: KAMPANYA HEDİYELERİ MODALI
+          Üstte odanın mevcut kampanyaları (ad, aylar, ekleyen, kaldır), altta yeni kampanya ekleme formu.
+          Her kampanya ayrı kayıttır; aynı müşteri farklı kampanyalarda tekrar tekrar hediye alabilir.
+          ============================================================ */}
+      {isGiftCampaignModalOpen && (() => {
+        const _r = rooms.find(x => String(x.id) === String(selectedRoomId));
+        if (!_r) return null;
+        const _ms = ['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'];
+        const _anchor = _giftAnchorIdx(_r);
+        const _lbl = (absIdx) => `${_ms[absIdx % 12]} ${Math.floor(absIdx / 12)}`;
+        const _camps = [...(_r.giftCampaigns || [])].sort((a, b) => a.startIndex - b.startIndex);
+        // Çakışma uyarısı: yeni kampanyanın ayları mevcut bir hediye aralığına denk geliyor mu?
+        const [_fy, _fm] = String(giftCampaignForm.startKey).split('-').map(Number);
+        const _newStart = Math.max(0, (_fy * 12 + _fm) - _anchor);
+        const _newMonths = Math.max(1, parseInt(giftCampaignForm.months) || 1);
+        const _overlap = getGiftRanges(_r).some(g => _newStart < g.start + g.months && g.start < _newStart + _newMonths);
+        // Başlangıç ayı seçenekleri: giriş ayından bugün + 12 aya kadar
+        const _now = new Date(); const _endIdx = _now.getFullYear() * 12 + _now.getMonth() + 12;
+        const _opts = []; for (let i = _anchor; i <= _endIdx; i++) _opts.push(<option key={i} value={`${Math.floor(i / 12)}-${i % 12}`}>{_lbl(i)}</option>);
+        return (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg animate-in fade-in zoom-in max-h-[90vh] flex flex-col">
+             <div className="p-5 border-b border-gray-100 flex justify-between items-center bg-fuchsia-50 rounded-t-2xl shrink-0">
+                 <div>
+                    <h3 className="text-lg font-bold text-fuchsia-700 flex items-center gap-2"><Gift size={18} /> Kampanya Hediyeleri</h3>
+                    <p className="text-[11px] text-fuchsia-500 font-bold mt-0.5">{_r.name} • {_r.customerName || '-'}</p>
+                 </div>
+                 <button onClick={() => setIsGiftCampaignModalOpen(false)}><X size={20} className="text-fuchsia-400 hover:text-fuchsia-600"/></button>
+             </div>
+             <div className="p-5 overflow-y-auto">
+                {/* MEVCUT KAMPANYALAR */}
+                <div className="mb-5">
+                   <div className="flex items-center justify-between mb-2">
+                      <span className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Tanımlı Kampanyalar</span>
+                      <span className="text-[11px] font-black text-fuchsia-600">Toplam hediye: {getTotalGiftMonths(_r)} ay</span>
+                   </div>
+                   {Number(_r.giftMonths) > 0 && (
+                      <div className="flex items-center gap-2 px-3 py-2 mb-1.5 rounded-lg bg-purple-50 border border-purple-100 text-[11px]">
+                         <span className="font-bold text-purple-700">Hediye Ay (tekil)</span>
+                         <span className="text-purple-500 font-bold">{_lbl(_anchor + Number(_r.giftStartMonthIndex || 0))} → {_r.giftMonths} ay</span>
+                         <span className="ml-auto text-[9px] text-purple-400">"Hediye Ay Ver" butonundan yönetilir</span>
+                      </div>
+                   )}
+                   {_camps.length === 0 ? (
+                      <div className="text-center text-[12px] text-gray-400 font-bold py-4 border border-dashed border-gray-200 rounded-xl">Henüz kampanya hediyesi yok.</div>
+                   ) : (
+                      <div className="flex flex-col gap-1.5">
+                         {_camps.map(c => (
+                            <div key={c.id} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-fuchsia-50 border border-fuchsia-100">
+                               <div className="w-8 h-8 rounded-lg bg-fuchsia-500 text-white flex flex-col items-center justify-center leading-none shrink-0">
+                                  <span className="font-black text-[12px]">{c.months}</span><span className="text-[7px] font-bold">AY</span>
+                               </div>
+                               <div className="flex-1 min-w-0">
+                                  <div className="text-[12px] font-bold text-slate-800 truncate">{c.name}</div>
+                                  <div className="text-[10px] font-bold text-fuchsia-600">
+                                     {_lbl(_anchor + c.startIndex)}{c.months > 1 ? ` – ${_lbl(_anchor + c.startIndex + c.months - 1)}` : ''}
+                                     <span className="text-gray-400 font-medium"> • {c.createdBy} • {new Date(c.createdAt).toLocaleDateString('tr-TR')}</span>
+                                  </div>
+                               </div>
+                               <button onClick={() => handleRemoveGiftCampaign(c.id)} title="Kampanyayı kaldır" className="p-1.5 rounded-lg text-rose-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"><Trash2 size={14}/></button>
+                            </div>
+                         ))}
+                      </div>
+                   )}
+                </div>
+
+                {/* YENİ KAMPANYA EKLE */}
+                <div className="rounded-xl border-2 border-fuchsia-100 p-4 bg-white">
+                   <div className="text-[11px] font-bold text-fuchsia-700 uppercase tracking-wider mb-3 flex items-center gap-1"><Plus size={12} strokeWidth={3}/> Yeni Kampanya Hediyesi</div>
+                   <div className="flex flex-col gap-3">
+                      <div className="flex flex-col gap-1">
+                         <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Kampanya Adı</label>
+                         <input type="text" value={giftCampaignForm.name} onChange={(e) => setGiftCampaignForm({ ...giftCampaignForm, name: e.target.value })} placeholder="Örn: 12 Ay Peşin Öde 2 Ay Hediye" className="border-2 border-gray-200 rounded-xl px-3 py-2 text-sm font-medium focus:outline-none focus:border-fuchsia-400" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                         <div className="flex flex-col gap-1">
+                            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Başlangıç Ayı</label>
+                            <select value={giftCampaignForm.startKey} onChange={(e) => setGiftCampaignForm({ ...giftCampaignForm, startKey: e.target.value })} className="border-2 border-gray-200 rounded-xl px-2 py-2 text-sm font-bold text-fuchsia-700 focus:outline-none focus:border-fuchsia-400 bg-white">{_opts}</select>
+                         </div>
+                         <div className="flex flex-col gap-1">
+                            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Hediye Ay Sayısı</label>
+                            <div className="flex items-stretch border-2 border-gray-200 rounded-xl overflow-hidden focus-within:border-fuchsia-400">
+                               <button type="button" onClick={() => setGiftCampaignForm({ ...giftCampaignForm, months: Math.max(1, _newMonths - 1) })} className="px-3 bg-gray-50 hover:bg-fuchsia-50 font-black text-slate-700">−</button>
+                               <input type="number" min="1" value={giftCampaignForm.months} onChange={(e) => setGiftCampaignForm({ ...giftCampaignForm, months: e.target.value })} className="flex-1 w-full text-center text-lg font-black text-fuchsia-700 focus:outline-none" />
+                               <button type="button" onClick={() => setGiftCampaignForm({ ...giftCampaignForm, months: _newMonths + 1 })} className="px-3 bg-gray-50 hover:bg-fuchsia-50 font-black text-slate-700">+</button>
+                            </div>
+                         </div>
+                      </div>
+                      <div className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-3 py-2">
+                         Hediye ayları: <b className="text-fuchsia-700">{_lbl(_anchor + _newStart)}{_newMonths > 1 ? ` – ${_lbl(_anchor + _newStart + _newMonths - 1)}` : ''}</b> • Bu aylar caride <b>0 TL (HEDİYE)</b> görünür.
+                      </div>
+                      {_overlap && <div className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">⚠ Seçilen aylar mevcut bir hediyeyle çakışıyor. Çakışan aylar yine 1 kez hediye sayılır; farklı bir başlangıç ayı seçmeniz önerilir.</div>}
+                      <button onClick={handleAddGiftCampaign} className="w-full py-2.5 rounded-xl bg-fuchsia-600 hover:bg-fuchsia-700 text-white text-sm font-bold transition-colors shadow-md shadow-fuchsia-500/30 flex items-center justify-center gap-2"><Check size={16}/> Kampanyayı Ekle</button>
+                   </div>
+                </div>
+             </div>
+          </div>
+        </div>
+        );
+      })()}
+
       {isGiftModalOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm animate-in fade-in zoom-in">
