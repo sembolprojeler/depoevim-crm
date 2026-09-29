@@ -1190,6 +1190,8 @@ const reader = new FileReader();
                                      {customer.name} 
                                      <span className="bg-gray-100 text-gray-500 px-2 py-0.5 rounded text-[10px] font-bold ml-3 border border-gray-200 shadow-sm flex items-center gap-1">
                                          Kayıt: {customer.createdAt || '01.01.2026'}
+                                         {/* YENİ: Carinin açıldığı SAAT — createdAtTs yeni müşteri kaydında otomatik yazılır */}
+                                         {customer.createdAtTs ? <span className="text-gray-600">• {new Date(customer.createdAtTs).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}</span> : null}
                                          <button onClick={() => { setEditCustomerData({...customer}); setIsEditCustomerModalOpen(true); }} className="hover:text-[#1bc5bd] transition-colors bg-white p-0.5 rounded shadow-sm border border-gray-200" title="Müşteri Bilgilerini Düzenle"><Edit size={10} /></button>
                                      </span>
                                      {/* YENİ: Cariyi oluşturan kullanıcı rozeti (eski kayıtlarda alan yoksa gösterilmez) */}
@@ -1782,7 +1784,7 @@ const entryDate = parseDateLocal(room.entryDate || '2026-01-01');
                                   <div className="absolute top-0 right-0 p-3"><span className="bg-cyan-50 text-cyan-600 px-3 py-1 rounded-full text-[10px] font-bold border border-cyan-100 uppercase">Aktif Kiralama</span></div>
                                   <div className="flex items-center gap-3 mb-4">
                                      <div className="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center text-gray-400"><Box size={20}/></div>
-                                     <div><h5 className="font-bold text-gray-800 text-lg">{room.name}</h5><p className="text-xs text-gray-500 font-medium">Giriş: {room.entryDate} • {displayRoomM3(room)} m³</p></div>
+                                     <div><h5 className="font-bold text-gray-800 text-lg">{room.name}</h5><p className="text-xs text-gray-500 font-medium">Giriş: {room.entryDate}{/* YENİ: Odanın sistemde açıldığı saat */}{room.rentedAt ? <span className="font-bold text-gray-600"> {new Date(room.rentedAt).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}</span> : null} • {displayRoomM3(room)} m³</p></div>
                                   </div>
                                   <div className="bg-gray-50 rounded-xl p-4 mb-4 border border-gray-100 flex flex-col gap-2">
                                      <div className="flex justify-between items-center"><span className="text-xs text-gray-500 font-semibold">Aylık Kira Bedeli:</span><span className="text-sm font-bold text-gray-700">{Math.round(monthlyTotal).toLocaleString('tr-TR')} TL {hasKdv && <span className="text-[9px] text-gray-400 font-normal">(KDV Dahil)</span>}</span></div>
