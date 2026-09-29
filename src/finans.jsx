@@ -14,10 +14,32 @@ import {
 } from 'lucide-react';
 
 // Hediye ay kontrolü (App.jsx ile aynı, bağımsız kopya — birçok başka ekranda da kullanılıyor)
+// YENİ (ÇOKLU KAMPANYA): Odanın TÜM hediye aralıklarını tek listede döndürür.
+//  • Eski tekil hediye: giftMonths + giftStartMonthIndex (mevcut "Hediye Ay Ver" butonu) → korunur
+//  • Kampanya hediyeleri: giftCampaigns = [{ id, name, startIndex, months, createdAt, createdBy }]
+//    Aynı müşteri farklı kampanyalarda birden fazla kez hediye alabilir; her kampanya ayrı aralıktır.
+const getGiftRanges = (roomLike) => {
+    if (!roomLike) return [];
+    const ranges = [];
+    if (Number(roomLike.giftMonths) > 0) {
+        ranges.push({ id: 'legacy', name: 'Hediye Ay', start: Number(roomLike.giftStartMonthIndex || 0), months: Number(roomLike.giftMonths) });
+    }
+    (Array.isArray(roomLike.giftCampaigns) ? roomLike.giftCampaigns : []).forEach(c => {
+        if (c && Number(c.months) > 0) ranges.push({ id: c.id, name: c.name || 'Kampanya', start: Number(c.startIndex || 0), months: Number(c.months) });
+    });
+    return ranges;
+};
+
+// Odaya verilen TOPLAM hediye ay sayısı (tekil + tüm kampanyalar)
+const getTotalGiftMonths = (roomLike) => getGiftRanges(roomLike).reduce((s, g) => s + g.months, 0);
+
+// Hediye döneminin bittiği ay sayacı (döngülerin gelecekteki hediye aylarını da görmesi için)
+const getGiftEndIndex = (roomLike) => getGiftRanges(roomLike).reduce((m, g) => Math.max(m, g.start + g.months), 0);
+
+// GÜNCELLENDİ: Bu ay herhangi bir hediye aralığına (tekil VEYA kampanya) giriyor mu?
+// İmza değişmedi → tüm mevcut çağrı noktaları (ledger, oda dökümü, raporlar) otomatik olarak kampanyaları da tanır.
 const isGiftedMonth = (roomLike, monthCounter) => {
-    if (!roomLike || !roomLike.giftMonths) return false;
-    const start = Number(roomLike.giftStartMonthIndex || 0);
-    return monthCounter >= start && monthCounter < start + Number(roomLike.giftMonths);
+    return getGiftRanges(roomLike).some(g => monthCounter >= g.start && monthCounter < g.start + g.months);
 };
 
 // --- YENİ EKLENEN: Gelişmiş Finans Alan Grafiği Bileşeni ---
@@ -281,7 +303,9 @@ export default function Finans(props) {
                        const detailRows = [];    // filtre ekranı için satırlar
 
                        rooms.forEach(room => {
-                           const gm = Number(room.giftMonths || 0);
+                           // GÜNCELLENDİ: Tekil hediye + tüm kampanya hediyeleri
+                           const _ranges = getGiftRanges(room);
+                           const gm = getTotalGiftMonths(room);
                            if (gm <= 0 || !room.entryDate) return;
                            const entryD = parseAnyDate(room.entryDate);
                            if (!entryD) return;
@@ -289,8 +313,9 @@ export default function Finans(props) {
                            const startIdx = Number(room.giftStartMonthIndex || 0);
                            const hasKdv = room.hasKdv !== undefined ? room.hasKdv : true;
 
-                           for (let k = 0; k < gm; k++) {
-                               const monthCounter = startIdx + k;
+                           void startIdx;
+                           const _counters = []; _ranges.forEach(g => { for (let k = 0; k < g.months; k++) _counters.push(g.start + k); });
+                           for (const monthCounter of _counters) {
                                // Hediye ayının denk geldiği takvim tarihi (giriş/ödeme çapasından monthCounter kadar ay sonrası)
                                const giftDate = new Date(anchorD.getFullYear(), anchorD.getMonth() + monthCounter, 1);
                                if (!inDashboardRange(giftDate, giftReportRange)) continue;
