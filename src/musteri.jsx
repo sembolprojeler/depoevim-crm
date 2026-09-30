@@ -155,6 +155,8 @@ export default function Musteri(props) {
   } = props;
 
   const [customerSearchTerm, setCustomerSearchTerm] = useState('');
+  // YENİ: Ay bazlı FAİZ DÜZENLEME modalı (yalnızca Yönetici)
+  const [isInterestEditOpen, setIsInterestEditOpen] = useState(false);
 
   // YENİ EKLENEN: Müşteri Listesi birleşik sayfa filtreleri
   const [custRoomFilter, setCustRoomFilter] = useState('all'); // 'all' | 'withRoom' | 'noRoom'
@@ -1594,6 +1596,13 @@ const reader = new FileReader();
                                  }} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm border ${customer.isInterestExempt ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'}`}>
                                      <TrendingUp size={14}/> {customer.isInterestExempt ? 'Faize Devam Et' : 'Faizi Pasife Al'}
                                  </button>
+                                 {/* YENİ: FAİZ DÜZENLE — Ay bazlı faiz kaldırma / geri getirme. SADECE Yönetici rolü görür ve kullanabilir. */}
+                                 {currentUserProfile?.role === 'Yönetici' && (
+                                     <button onClick={() => setIsInterestEditOpen(true)} className="px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm border bg-violet-50 hover:bg-violet-100 text-violet-700 border-violet-200" title="Seçtiğiniz ayın faizini kaldırın veya geri getirin (yalnızca yönetici)">
+                                         <Edit size={14}/> Faiz Düzenle
+                                         {(customer.interestWaivedMonths || []).length > 0 && <span className="bg-violet-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full">{customer.interestWaivedMonths.length} ay silindi</span>}
+                                     </button>
+                                 )}
                                  
                                  <button onClick={() => { if(!checkActionPerm('action-cari-duzenle')) return; setIsEditLedgerListModalOpen(true); }} className="bg-orange-50 hover:bg-orange-100 text-orange-600 border border-orange-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm">
                                      <Settings size={14}/> Cari Düzenleme
@@ -2222,6 +2231,83 @@ const entryDate = parseDateLocal(room.entryDate || '2026-01-01');
       )}
 
       {/* CARİ LİSTE DÜZENLEME MODALI */}
+      {/* ============================================================
+          YENİ: FAİZ DÜZENLE MODALI (yalnızca Yönetici)
+          Carideki faizler, VURDUĞU AYA göre gruplanır. Her ay için "Faizi Kaldır" / "Geri Getir".
+          Veri: customer.interestWaivedMonths = ['YYYY-MM', ...] → faiz motoru bu aylardaki vuruşları atlar.
+          Tutarlar, silinmiş aylar da görünsün diye silme uygulanmamış kopya üzerinden hesaplanır.
+          ============================================================ */}
+      {isInterestEditOpen && selectedCustomerId && currentUserProfile?.role === 'Yönetici' && (() => {
+          const _c = customers.find(c => String(c.id) === String(selectedCustomerId));
+          if (!_c) return null;
+          const _waived = new Set(_c.interestWaivedMonths || []);
+          const _ms = ['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'];
+          // Silme uygulanmamış tam faiz listesi
+          const _full = (getCustomerLedger({ ..._c, interestWaivedMonths: [] }).ledger || []).filter(t => t.isInterest);
+          const _groups = {};
+          _full.forEach(t => {
+              const d = t.date instanceof Date ? t.date : new Date(t.date);
+              const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+              if (!_groups[k]) _groups[k] = { key: k, label: `${_ms[d.getMonth()]} ${d.getFullYear()}`, total: 0, count: 0 };
+              _groups[k].total += Number(t.debt) || 0; _groups[k].count++;
+          });
+          const _list = Object.values(_groups).sort((a, b) => b.key.localeCompare(a.key));
+          const _fmt = (n) => Math.round(n).toLocaleString('tr-TR');
+          const _activeTotal = _list.filter(g => !_waived.has(g.key)).reduce((s, g) => s + g.total, 0);
+          const _waivedTotal = _list.filter(g => _waived.has(g.key)).reduce((s, g) => s + g.total, 0);
+
+          const _toggle = async (key) => {
+              const next = _waived.has(key) ? [..._waived].filter(k => k !== key) : [..._waived, key];
+              setCustomers(prev => prev.map(c => String(c.id) === String(_c.id) ? { ...c, interestWaivedMonths: next } : c));
+              if (db && firebaseUser) {
+                  try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'customers', String(_c.id)), { interestWaivedMonths: next }, { merge: true }); } catch (e) { console.error('Faiz düzenleme hatası:', e); }
+              }
+              const g = _groups[key];
+              logActivity('Faiz Düzenleme', `${_c.name} → ${g?.label || key} faizi (${_fmt(g?.total || 0)} TL) ${_waived.has(key) ? 'GERİ GETİRİLDİ' : 'KALDIRILDI'}.`);
+          };
+
+          return (
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md animate-in fade-in zoom-in max-h-[90vh] flex flex-col">
+              <div className="p-5 border-b border-gray-100 flex justify-between items-center bg-violet-50 rounded-t-2xl shrink-0">
+                <div>
+                  <h3 className="text-lg font-bold text-violet-700 flex items-center gap-2"><Edit size={18}/> Faiz Düzenle</h3>
+                  <p className="text-[11px] text-violet-500 font-bold mt-0.5">{_c.name} • Yalnızca yönetici</p>
+                </div>
+                <button onClick={() => setIsInterestEditOpen(false)}><X size={20} className="text-violet-400 hover:text-violet-600"/></button>
+              </div>
+              <div className="p-5 overflow-y-auto">
+                <div className="grid grid-cols-2 gap-2 mb-4">
+                  <div className="rounded-xl bg-rose-50 border border-rose-100 px-3 py-2"><p className="text-[10px] font-bold text-rose-400 uppercase">İşleyen Faiz</p><p className="text-lg font-black text-rose-600">{_fmt(_activeTotal)} TL</p></div>
+                  <div className="rounded-xl bg-gray-50 border border-gray-200 px-3 py-2"><p className="text-[10px] font-bold text-gray-400 uppercase">Silinen Faiz</p><p className="text-lg font-black text-gray-500 line-through decoration-2">{_fmt(_waivedTotal)} TL</p></div>
+                </div>
+                <p className="text-[11px] text-gray-500 mb-3">Faizler, caride <b>işlendiği aya</b> göre listelenir. Kaldırdığınız ayın faizi cariden düşer; diğer aylar etkilenmez. "Geri Getir" ile istediğiniz zaman geri alabilirsiniz.</p>
+                {_c.isInterestExempt && <div className="mb-3 text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">⚠ Bu müşterinin faizi tamamen pasif. Aşağıdaki aylar "Faize Devam Et" yapılınca geçerli olur.</div>}
+                {_list.length === 0 ? (
+                  <div className="text-center text-sm text-gray-400 font-bold py-8 border border-dashed border-gray-200 rounded-xl">Bu caride işlenmiş faiz bulunmuyor.</div>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    {_list.map(g => {
+                      const off = _waived.has(g.key);
+                      return (
+                        <div key={g.key} className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border ${off ? 'bg-gray-50 border-gray-200' : 'bg-white border-rose-100'}`}>
+                          <div className="flex-1 min-w-0">
+                            <div className={`text-[13px] font-bold ${off ? 'text-gray-400' : 'text-slate-800'}`}>{g.label}</div>
+                            <div className="text-[10px] font-bold text-gray-400">{g.count} faiz kalemi</div>
+                          </div>
+                          <span className={`text-sm font-black ${off ? 'text-gray-400 line-through' : 'text-rose-600'}`}>{_fmt(g.total)} TL</span>
+                          <button onClick={() => _toggle(g.key)} className={`px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-colors shrink-0 ${off ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'}`}>{off ? 'Geri Getir' : 'Faizi Kaldır'}</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          );
+      })()}
+
       {isEditLedgerListModalOpen && selectedCustomerId && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col animate-in fade-in zoom-in">
