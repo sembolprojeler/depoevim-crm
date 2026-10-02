@@ -6705,6 +6705,9 @@ if (isDueYet && !selectedRoomDetail.paidMonths?.includes(key) && !isGifted && !i
       // Listedeki aylarda VURAN faizler cariye işlenmez. Faiz takvimi yine ilerler (sonraki aylar etkilenmez),
       // listeden çıkarılınca faiz canlı hesaplandığı için anında geri gelir.
       const _waivedMonths = new Set(Array.isArray(customer.interestWaivedMonths) ? customer.interestWaivedMonths : []);
+      // YENİ: KALEM BAZLI FAİZ SİLME. customer.interestWaivedItems = ['interest-<zaman>-<kalem>', ...]
+      // Ay içindeki faiz kalemlerinden yalnızca seçileni düşürmek için (ekstredeki satır id'siyle aynı anahtar).
+      const _waivedItems = new Set(Array.isArray(customer.interestWaivedItems) ? customer.interestWaivedItems : []);
 
       // Ana borcun (faiz hariç) en son sıfırlandığı an — kapatılmış geçmiş dönemler faiz DIŞI kalır.
       // Ayrıca SON TAHSİLAT (credit>0) tarihi de bulunur: kısmi/eksik ödemede faiz, son tahsilattan
@@ -6811,6 +6814,8 @@ if (isDueYet && !selectedRoomDetail.paidMonths?.includes(key) && !isGifted && !i
               // YENİ: Yöneticinin sildiği aya denk gelen faiz vuruşu atlanır (takvim ilerler, geri alınabilir)
               const _tickMonthKey = (() => { const _t = new Date(_min); return `${_t.getFullYear()}-${String(_t.getMonth() + 1).padStart(2, '0')}`; })();
               if (_waivedMonths.has(_tickMonthKey)) { _d.next = _d.next + 30 * 86400000; continue; }
+              // YENİ: Tek tek silinmiş faiz kalemi atlanır (aynı ayın diğer kalemleri işlemeye devam eder)
+              if (_waivedItems.has(`interest-${_min}-${_d.key}`)) { _d.next = _d.next + 30 * 86400000; continue; }
 
               // 1 Ağustos 2026 koruma kapısı: kapıdan önceki vuruşlar atlanır (takvim ilerler)
               if (_min >= interestGateTime) {
