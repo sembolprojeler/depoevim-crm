@@ -1600,7 +1600,7 @@ const reader = new FileReader();
                                  {currentUserProfile?.role === 'Yönetici' && (
                                      <button onClick={() => setIsInterestEditOpen(true)} className="px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm border bg-violet-50 hover:bg-violet-100 text-violet-700 border-violet-200" title="Seçtiğiniz ayın faizini kaldırın veya geri getirin (yalnızca yönetici)">
                                          <Edit size={14}/> Faiz Düzenle
-                                         {(customer.interestWaivedMonths || []).length > 0 && <span className="bg-violet-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full">{customer.interestWaivedMonths.length} ay silindi</span>}
+                                         {((customer.interestWaivedMonths || []).length + (customer.interestWaivedItems || []).length) > 0 && <span className="bg-violet-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full">{(customer.interestWaivedMonths || []).length > 0 ? `${customer.interestWaivedMonths.length} ay` : ''}{(customer.interestWaivedMonths || []).length > 0 && (customer.interestWaivedItems || []).length > 0 ? ' + ' : ''}{(customer.interestWaivedItems || []).length > 0 ? `${customer.interestWaivedItems.length} kalem` : ''} silindi</span>}
                                      </button>
                                  )}
                                  
@@ -2241,20 +2241,35 @@ const entryDate = parseDateLocal(room.entryDate || '2026-01-01');
           const _c = customers.find(c => String(c.id) === String(selectedCustomerId));
           if (!_c) return null;
           const _waived = new Set(_c.interestWaivedMonths || []);
+          const _waivedItems = new Set(_c.interestWaivedItems || []);   // YENİ: tek tek silinen kalemler
           const _ms = ['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'];
           // Silme uygulanmamış tam faiz listesi
-          const _full = (getCustomerLedger({ ..._c, interestWaivedMonths: [] }).ledger || []).filter(t => t.isInterest);
+          const _full = (getCustomerLedger({ ..._c, interestWaivedMonths: [], interestWaivedItems: [] }).ledger || []).filter(t => t.isInterest);
           const _groups = {};
           _full.forEach(t => {
               const d = t.date instanceof Date ? t.date : new Date(t.date);
               const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-              if (!_groups[k]) _groups[k] = { key: k, label: `${_ms[d.getMonth()]} ${d.getFullYear()}`, total: 0, count: 0 };
+              if (!_groups[k]) _groups[k] = { key: k, label: `${_ms[d.getMonth()]} ${d.getFullYear()}`, total: 0, count: 0, items: [] };
               _groups[k].total += Number(t.debt) || 0; _groups[k].count++;
+              _groups[k].items.push(t);   // YENİ: kalem detayı (ayrı ayrı kaldırma için)
           });
           const _list = Object.values(_groups).sort((a, b) => b.key.localeCompare(a.key));
           const _fmt = (n) => Math.round(n).toLocaleString('tr-TR');
-          const _activeTotal = _list.filter(g => !_waived.has(g.key)).reduce((s, g) => s + g.total, 0);
-          const _waivedTotal = _list.filter(g => _waived.has(g.key)).reduce((s, g) => s + g.total, 0);
+          // GÜNCELLENDİ: Toplamlar KALEM bazında — ay toptan silinmişse veya kalem tek tek silinmişse "silinen" sayılır
+          const _isItemOff = (g, t) => _waived.has(g.key) || _waivedItems.has(t.id);
+          let _activeTotal = 0, _waivedTotal = 0;
+          _list.forEach(g => g.items.forEach(t => { if (_isItemOff(g, t)) _waivedTotal += Number(t.debt) || 0; else _activeTotal += Number(t.debt) || 0; }));
+
+          // YENİ: Tek bir faiz kalemini kaldır / geri getir
+          const _toggleItem = async (g, t) => {
+              const off = _waivedItems.has(t.id);
+              const next = off ? [..._waivedItems].filter(k => k !== t.id) : [..._waivedItems, t.id];
+              setCustomers(prev => prev.map(c => String(c.id) === String(_c.id) ? { ...c, interestWaivedItems: next } : c));
+              if (db && firebaseUser) {
+                  try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'customers', String(_c.id)), { interestWaivedItems: next }, { merge: true }); } catch (e) { console.error('Faiz kalemi düzenleme hatası:', e); }
+              }
+              logActivity('Faiz Düzenleme', `${_c.name} → ${t.dateStr} tarihli faiz kalemi (${_fmt(t.debt)} TL) ${off ? 'GERİ GETİRİLDİ' : 'KALDIRILDI'}.`);
+          };
 
           const _toggle = async (key) => {
               const next = _waived.has(key) ? [..._waived].filter(k => k !== key) : [..._waived, key];
@@ -2281,7 +2296,7 @@ const entryDate = parseDateLocal(room.entryDate || '2026-01-01');
                   <div className="rounded-xl bg-rose-50 border border-rose-100 px-3 py-2"><p className="text-[10px] font-bold text-rose-400 uppercase">İşleyen Faiz</p><p className="text-lg font-black text-rose-600">{_fmt(_activeTotal)} TL</p></div>
                   <div className="rounded-xl bg-gray-50 border border-gray-200 px-3 py-2"><p className="text-[10px] font-bold text-gray-400 uppercase">Silinen Faiz</p><p className="text-lg font-black text-gray-500 line-through decoration-2">{_fmt(_waivedTotal)} TL</p></div>
                 </div>
-                <p className="text-[11px] text-gray-500 mb-3">Faizler, caride <b>işlendiği aya</b> göre listelenir. Kaldırdığınız ayın faizi cariden düşer; diğer aylar etkilenmez. "Geri Getir" ile istediğiniz zaman geri alabilirsiniz.</p>
+                <p className="text-[11px] text-gray-500 mb-3">Faizler, caride <b>işlendiği aya</b> göre listelenir. <b>"Ayı Kaldır"</b> o ayın tüm faizini, kalemin yanındaki <b>"Kaldır"</b> yalnızca o faiz kalemini cariden düşürür; diğerleri etkilenmez. "Geri Getir" ile istediğiniz zaman geri alabilirsiniz.</p>
                 {_c.isInterestExempt && <div className="mb-3 text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">⚠ Bu müşterinin faizi tamamen pasif. Aşağıdaki aylar "Faize Devam Et" yapılınca geçerli olur.</div>}
                 {_list.length === 0 ? (
                   <div className="text-center text-sm text-gray-400 font-bold py-8 border border-dashed border-gray-200 rounded-xl">Bu caride işlenmiş faiz bulunmuyor.</div>
@@ -2289,14 +2304,42 @@ const entryDate = parseDateLocal(room.entryDate || '2026-01-01');
                   <div className="flex flex-col gap-1.5">
                     {_list.map(g => {
                       const off = _waived.has(g.key);
+                      // Ayın işleyen (silinmemiş) tutarı — kalemler tek tek silindikçe düşer
+                      const _gActive = g.items.reduce((s, t) => s + (_isItemOff(g, t) ? 0 : (Number(t.debt) || 0)), 0);
                       return (
-                        <div key={g.key} className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border ${off ? 'bg-gray-50 border-gray-200' : 'bg-white border-rose-100'}`}>
-                          <div className="flex-1 min-w-0">
-                            <div className={`text-[13px] font-bold ${off ? 'text-gray-400' : 'text-slate-800'}`}>{g.label}</div>
-                            <div className="text-[10px] font-bold text-gray-400">{g.count} faiz kalemi</div>
+                        <div key={g.key} className={`rounded-xl border overflow-hidden ${off ? 'bg-gray-50 border-gray-200' : 'bg-white border-rose-100'}`}>
+                          {/* AY BAŞLIĞI — "Ayı Kaldır" ayın TÜM kalemlerini toptan düşürür */}
+                          <div className="flex items-center gap-3 px-3 py-2.5">
+                            <div className="flex-1 min-w-0">
+                              <div className={`text-[13px] font-bold ${off ? 'text-gray-400' : 'text-slate-800'}`}>{g.label}</div>
+                              <div className="text-[10px] font-bold text-gray-400">{g.count} faiz kalemi</div>
+                            </div>
+                            <span className={`text-sm font-black ${off || _gActive < 0.5 ? 'text-gray-400 line-through' : 'text-rose-600'}`}>{_fmt(off ? g.total : _gActive)} TL</span>
+                            <button onClick={() => _toggle(g.key)} className={`px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-colors shrink-0 ${off ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'}`}>{off ? 'Ayı Geri Getir' : 'Ayı Kaldır'}</button>
                           </div>
-                          <span className={`text-sm font-black ${off ? 'text-gray-400 line-through' : 'text-rose-600'}`}>{_fmt(g.total)} TL</span>
-                          <button onClick={() => _toggle(g.key)} className={`px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-colors shrink-0 ${off ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'}`}>{off ? 'Geri Getir' : 'Faizi Kaldır'}</button>
+                          {/* YENİ: KALEM KALEM LİSTE — her faiz kalemi ayrı ayrı kaldırılıp geri getirilebilir */}
+                          <div className="border-t border-gray-100 bg-gray-50/50 divide-y divide-gray-100">
+                            {g.items.map(t => {
+                              const itemOff = _isItemOff(g, t);
+                              // Açıklamadan kaynak kalemi çıkar ("Ekstra Gecikme Faizi (%2,58) — L 103 Odası - Kira (Mayıs 2026)")
+                              const _src = String(t.desc || '').split(' — ')[1] || '';
+                              const _rate = (String(t.desc || '').match(/%[\d.,]+/) || [''])[0];
+                              return (
+                                <div key={t.id} className="flex items-center gap-2 pl-5 pr-3 py-2">
+                                  <div className="flex-1 min-w-0">
+                                    <div className={`text-[11px] font-bold ${itemOff ? 'text-gray-400' : 'text-slate-700'}`}>{t.dateStr}{_rate ? <span className="text-gray-400 font-medium"> • {_rate}</span> : null}</div>
+                                    {_src && <div className={`text-[10px] truncate ${itemOff ? 'text-gray-300' : 'text-gray-500'}`} title={_src}>{_src}</div>}
+                                  </div>
+                                  <span className={`text-[12px] font-black ${itemOff ? 'text-gray-400 line-through' : 'text-rose-600'}`}>{_fmt(t.debt)} TL</span>
+                                  {off ? (
+                                    <span className="text-[9px] font-bold text-gray-400 px-2 shrink-0 w-[74px] text-center">Ay silindi</span>
+                                  ) : (
+                                    <button onClick={() => _toggleItem(g, t)} className={`px-2 py-1 rounded-md text-[10px] font-bold border transition-colors shrink-0 w-[74px] ${_waivedItems.has(t.id) ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-white hover:bg-rose-50 text-rose-600 border-rose-200'}`}>{_waivedItems.has(t.id) ? 'Geri Getir' : 'Kaldır'}</button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
                       );
                     })}
