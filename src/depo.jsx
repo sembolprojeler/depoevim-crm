@@ -479,6 +479,51 @@ export default function Depo(props) {
       nextDate: '',                                       // sonraki planlanan tarih
       note: ''
   });
+  // YENİ: KONTROL BELGELERİ (ilaçlama firmasının verdiği rapor/sertifika: fotoğraf veya PDF)
+  const [inspectionFiles, setInspectionFiles] = useState([]);          // modalda seçilen, henüz yüklenmemiş dosyalar (File[])
+  const [inspectionUploading, setInspectionUploading] = useState(false); // kaydet/yükle sırasında butonları kilitler
+  const [inspectionDocAddingId, setInspectionDocAddingId] = useState(null); // mevcut kayda belge eklenirken hangi kayıt
+
+  // Seçilen dosyaları sunucuya yükleyip belge nesnelerine çevirir (icra dosyalarıyla aynı yapı)
+  const uploadInspectionDocs = async (fileList) => {
+      const out = [];
+      for (const f of Array.from(fileList || [])) {
+          try {
+              const url = await uploadImageToServer(f);
+              if (!url) continue;
+              const kind = String(f.type || '') === 'application/pdf' || /\.pdf$/i.test(f.name || '') ? 'pdf' : 'image';
+              out.push({ id: `idoc_${Date.now()}_${Math.floor(Math.random() * 10000)}`, name: f.name, url, kind, addedBy: currentUserProfile?.name || '', addedAt: Date.now() });
+          } catch (e) { console.error('Kontrol belgesi yükleme hatası:', e); }
+      }
+      return out;
+  };
+
+  // Mevcut bir kontrol kaydına SONRADAN belge ekler (firma raporu birkaç gün sonra gönderebilir)
+  const handleAddInspectionDocs = async (inspId, fileList) => {
+      if (!fileList || fileList.length === 0) return;
+      setInspectionDocAddingId(inspId);
+      const added = await uploadInspectionDocs(fileList);
+      setInspectionDocAddingId(null);
+      if (added.length === 0) { alert('Belge yüklenemedi, lütfen tekrar deneyin.'); return; }
+      setInspections(prev => prev.map(i => String(i.id) === String(inspId) ? { ...i, documents: [...(i.documents || []), ...added] } : i));
+      if (db && firebaseUser) {
+          try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'inspections', String(inspId)), { documents: arrayUnion(...added) }, { merge: true }); } catch (e) { console.error('Kontrol belgesi kaydetme hatası:', e); }
+      }
+      logActivity('Şube Kontrol', `Kontrol kaydına ${added.length} belge eklendi.`);
+  };
+
+  // Kayıttan belge kaldırır
+  const handleRemoveInspectionDoc = async (inspId, docId) => {
+      if (!window.confirm('Bu belgeyi kaldırmak istediğinize emin misiniz?')) return;
+      const insp = (inspections || []).find(i => String(i.id) === String(inspId));
+      if (!insp) return;
+      const next = (insp.documents || []).filter(d => String(d.id) !== String(docId));
+      setInspections(prev => prev.map(i => String(i.id) === String(inspId) ? { ...i, documents: next } : i));
+      if (db && firebaseUser) {
+          try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'inspections', String(inspId)), { documents: next }, { merge: true }); } catch (e) { console.error('Kontrol belgesi silme hatası:', e); }
+      }
+  };
+
   // Kontrol türleri — renk/etiket tanımları tek yerden yönetilir
   const inspectionTypes = {
       temizlik: { label: 'Temizlik',      color: 'bg-blue-500',   text: 'text-blue-600',   bgLight: 'bg-blue-50',   border: 'border-blue-200',   icon: Box },
@@ -489,6 +534,10 @@ export default function Depo(props) {
   const handleSaveInspection = async () => {
       if (!inspectionWarehouseId || !inspectionForm.date) return;
       const wh = warehouses.find(w => String(w.id) === String(inspectionWarehouseId));
+      // YENİ: Seçilen belgeler (foto/PDF) önce yüklenir, sonra kayda eklenir
+      setInspectionUploading(true);
+      const _docs = inspectionFiles.length > 0 ? await uploadInspectionDocs(inspectionFiles) : [];
+      setInspectionUploading(false);
       const record = {
           id: `insp_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
           warehouseId: inspectionWarehouseId,
@@ -500,6 +549,7 @@ export default function Depo(props) {
           nextDate: inspectionForm.nextDate || '',
           note: inspectionForm.note || '',
           notes: [],                                        // sonradan eklenen ek notlar
+          documents: _docs,                                 // YENİ: firma belgeleri (foto / PDF)
           createdBy: currentUserProfile?.name || 'Sistem',
           createdByRole: getCurrentRole()?.name || currentUserProfile?.role || '',
           createdAt: Date.now()
@@ -516,6 +566,7 @@ export default function Depo(props) {
 
       // Formu sıfırla ve pencereyi kapat
       setInspectionForm({ type: 'temizlik', date: new Date().toISOString().split('T')[0], company: '', cost: '', nextDate: '', note: '' });
+      setInspectionFiles([]);
       setIsInspectionModalOpen(false);
   };
 
@@ -586,7 +637,7 @@ export default function Depo(props) {
                                 <p className="text-xs text-gray-500 font-semibold">Temizlik · İlaçlama · Genel Kontrol Kayıtları</p>
                             </div>
                         </div>
-                        <button onClick={() => { setInspectionForm({ type: 'temizlik', date: new Date().toISOString().split('T')[0], company: '', cost: '', nextDate: '', note: '' }); setIsInspectionModalOpen(true); }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/30 transition-colors">
+                        <button onClick={() => { setInspectionForm({ type: 'temizlik', date: new Date().toISOString().split('T')[0], company: '', cost: '', nextDate: '', note: '' }); setInspectionFiles([]); setIsInspectionModalOpen(true); }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/30 transition-colors">
                             <Plus size={18} /> Yeni Kontrol Kaydı
                         </button>
                     </div>
@@ -695,6 +746,36 @@ export default function Depo(props) {
                                             <p className="text-sm text-slate-700 font-medium whitespace-pre-wrap">{insp.note}</p>
                                         </div>
                                     )}
+
+                                    {/* YENİ: BELGELER (firma raporu, fotoğraf, PDF) + sonradan belge ekleme */}
+                                    <div className={`rounded-xl border p-3 mb-4 ${insp.type === 'ilaclama' ? 'bg-emerald-50/40 border-emerald-100' : 'bg-gray-50/60 border-gray-100'}`}>
+                                        <div className="flex items-center justify-between gap-2 mb-2">
+                                            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">{insp.type === 'ilaclama' ? 'İlaçlama Belgeleri' : 'Belgeler'} ({(insp.documents || []).length})</p>
+                                            <label className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border cursor-pointer transition-colors ${inspectionDocAddingId === insp.id ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-wait' : 'bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50'}`}>
+                                                <Upload size={12} /> {inspectionDocAddingId === insp.id ? 'Yükleniyor...' : 'Belge Ekle'}
+                                                <input type="file" multiple accept="image/*,application/pdf" className="hidden" disabled={inspectionDocAddingId === insp.id} onChange={(e) => { const f = e.target.files; handleAddInspectionDocs(insp.id, Array.from(f || [])); e.target.value = ''; }} />
+                                            </label>
+                                        </div>
+                                        {(insp.documents || []).length === 0 ? (
+                                            <p className="text-[11px] text-gray-400 font-medium">Henüz belge eklenmemiş.</p>
+                                        ) : (
+                                            <div className="flex flex-wrap gap-2">
+                                                {insp.documents.map(d => (
+                                                    <div key={d.id} className="relative group w-24">
+                                                        <a href={d.url} target="_blank" rel="noopener noreferrer" title={d.name} className="block w-24 h-24 rounded-lg border border-gray-200 bg-white overflow-hidden hover:border-emerald-400 transition-colors">
+                                                            {d.kind === 'pdf' ? (
+                                                                <div className="w-full h-full flex flex-col items-center justify-center gap-1 bg-rose-50 text-rose-600"><span className="text-lg font-black">PDF</span><span className="text-[9px] font-bold px-1 truncate w-full text-center">{d.name}</span></div>
+                                                            ) : (
+                                                                <img src={d.url} alt={d.name} className="w-full h-full object-cover" />
+                                                            )}
+                                                        </a>
+                                                        <button onClick={() => handleRemoveInspectionDoc(insp.id, d.id)} title="Belgeyi kaldır" className="absolute -top-1.5 -right-1.5 bg-white border border-red-200 text-red-500 rounded-full p-0.5 shadow-sm opacity-80 hover:opacity-100"><X size={12} /></button>
+                                                        <p className="text-[9px] text-gray-400 mt-0.5 truncate">{d.addedBy} • {new Date(d.addedAt).toLocaleDateString('tr-TR')}</p>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
 
                                     {/* SONRADAN EKLENEN NOTLAR */}
                                     {(insp.notes || []).length > 0 && (
@@ -805,13 +886,38 @@ export default function Depo(props) {
                   <label className="text-xs font-bold text-gray-600 uppercase tracking-wider">Açıklama / Yapılan İşlemler</label>
                   <textarea value={inspectionForm.note} onChange={(e) => setInspectionForm({ ...inspectionForm, note: e.target.value })} rows={4} placeholder="Örn: Tüm koridorlar ve ortak alanlar temizlendi. B blok zemininde nem tespit edildi." className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-indigo-500 focus:bg-white transition-all font-medium text-slate-700 resize-none" />
                 </div>
+
+                {/* YENİ: BELGE EKLE (Fotoğraf / PDF) — İlaçlama seçiliyse firma raporu için vurgulanır, diğer türlerde de kullanılabilir */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-bold text-gray-600 uppercase tracking-wider">
+                    {inspectionForm.type === 'ilaclama' ? 'İlaçlama Belgesi / Firma Raporu (Fotoğraf veya PDF)' : 'Belge / Fotoğraf (Opsiyonel)'}
+                  </label>
+                  <label className={`flex flex-col items-center justify-center gap-1.5 py-5 rounded-xl border-2 border-dashed cursor-pointer transition-colors ${inspectionForm.type === 'ilaclama' ? 'border-emerald-300 bg-emerald-50/50 hover:bg-emerald-50 text-emerald-700' : 'border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-500'}`}>
+                    <Upload size={20} />
+                    <span className="text-xs font-bold">Dosya seçin veya fotoğraf çekin</span>
+                    <span className="text-[10px] font-medium opacity-70">JPG, PNG, PDF • Birden fazla seçilebilir</span>
+                    <input type="file" multiple accept="image/*,application/pdf" className="hidden" onChange={(e) => { const f = Array.from(e.target.files || []); e.target.value = ''; setInspectionFiles(prev => [...prev, ...f]); }} />
+                  </label>
+                  {inspectionFiles.length > 0 && (
+                    <div className="flex flex-col gap-1.5 mt-1">
+                      {inspectionFiles.map((f, i) => (
+                        <div key={i} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white border border-gray-200">
+                          <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${String(f.type) === 'application/pdf' ? 'bg-rose-100 text-rose-700' : 'bg-sky-100 text-sky-700'}`}>{String(f.type) === 'application/pdf' ? 'PDF' : 'FOTO'}</span>
+                          <span className="text-xs font-bold text-slate-700 truncate flex-1">{f.name}</span>
+                          <span className="text-[10px] text-gray-400 shrink-0">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                          <button onClick={() => setInspectionFiles(prev => prev.filter((_, j) => j !== i))} className="text-gray-400 hover:text-red-500"><X size={14} /></button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Pencere alt butonları */}
               <div className="flex gap-3 px-6 py-4 border-t border-gray-100 sticky bottom-0 bg-white rounded-b-2xl">
                 <button onClick={() => setIsInspectionModalOpen(false)} className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 py-3 rounded-xl font-bold text-sm transition-colors">İptal</button>
-                <button onClick={handleSaveInspection} disabled={!inspectionForm.date} className="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white py-3 rounded-xl font-bold text-sm transition-colors flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/30">
-                  <Check size={17} /> Kaydet
+                <button onClick={handleSaveInspection} disabled={!inspectionForm.date || inspectionUploading} className="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white py-3 rounded-xl font-bold text-sm transition-colors flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/30">
+                  <Check size={17} /> {inspectionUploading ? 'Belgeler yükleniyor...' : 'Kaydet'}
                 </button>
               </div>
             </div>
