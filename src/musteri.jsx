@@ -157,6 +157,8 @@ export default function Musteri(props) {
   const [customerSearchTerm, setCustomerSearchTerm] = useState('');
   // YENİ: Ay bazlı FAİZ DÜZENLEME modalı (yalnızca Yönetici)
   const [isInterestEditOpen, setIsInterestEditOpen] = useState(false);
+  // YENİ: Çıkış aktarım hatası onarım panelinde işaretlenen satırlar ({ custId, ids: [...] })
+  const [exitRepairPick, setExitRepairPick] = useState({ custId: null, ids: [] });
 
   // YENİ EKLENEN: Müşteri Listesi birleşik sayfa filtreleri
   const [custRoomFilter, setCustRoomFilter] = useState('all'); // 'all' | 'withRoom' | 'noRoom'
@@ -1534,6 +1536,105 @@ const reader = new FileReader();
 
                       {/* CARİ HESAP EKSTRESİ YUKARIYA TAŞINDI */}
                       <div className="mt-2 mb-2">
+                         {/* ============================================================
+                             YENİ: ÇIKIŞ AKTARIM HATASI ONARIMI (yalnızca Yönetici)
+                             Eski çıkış kodu; Cari Düzenleme'de silinmiş ayları geri ekliyor, zam geçmişini yok sayıp
+                             ham kira kullanıyor ve tarihi 1 gün geri kaydırıyordu (ör. 1 Eylül → 31.08).
+                             Sistem borçlu müşterinin çıkışına izin vermediği için, çıkış yapmış (aktif odası olmayan)
+                             bir müşteride sonradan oluşan bakiye bu hatadan kaynaklanır.
+                             Panel: o hatalı "Eski Kira Borcu" satırlarını tespit eder, seçileni cariden kaldırır,
+                             kaldırılanları arşivler (Geri Al ile geri yüklenebilir).
+                             ============================================================ */}
+                         {currentUserProfile?.role === 'Yönetici' && (() => {
+                             const _active = rooms.filter(r => r.customerName === customer.name);
+                             const _removed = customer.removedExitTransfers || [];
+                             const _fmt = (n) => Math.round(Number(n) || 0).toLocaleString('tr-TR');
+                             const _save = async (payload, logText) => {
+                                 setCustomers(prev => prev.map(c => String(c.id) === String(customer.id) ? { ...c, ...payload } : c));
+                                 if (db && firebaseUser) {
+                                     try { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'customers', String(customer.id)), payload, { merge: true }); } catch (e) { console.error('Çıkış aktarım onarım hatası:', e); }
+                                 }
+                                 logActivity('Çıkış Aktarım Onarımı', logText);
+                             };
+                             // Geri Al: arşivlenen satırları cariye geri yükler
+                             const _restoreLine = _removed.length > 0 ? (
+                                 <div className="mb-3 text-[11px] text-gray-500 flex items-center gap-2 flex-wrap">
+                                     <span>ℹ {_removed.length} satır "çıkış aktarım hatası" olarak cariden kaldırıldı ({_fmt(_removed.reduce((s, d) => s + Number(d.amount || 0), 0))} TL).</span>
+                                     <button onClick={() => { if (!window.confirm('Kaldırılan satırlar cariye geri eklensin mi?')) return; const back = _removed.map(({ removedAt, removedBy, removeReason, ...d }) => d); _save({ extraDebts: [...(customer.extraDebts || []), ...back], removedExitTransfers: [] }, `${customer.name} → kaldırılan ${back.length} çıkış aktarım satırı geri yüklendi.`); }} className="font-bold text-indigo-600 hover:underline">Geri Al</button>
+                                 </div>
+                             ) : null;
+                             if (_active.length > 0) return _restoreLine;
+                             const _bal = Number(getCustomerLedger(customer).balance || 0);
+                             if (_bal <= 0.5) return _restoreLine;
+
+                             // Eski formatlı aktarım satırları
+                             const _re = /^(.+?) Odası Eski Kira Borcu \((Çıkış Yapılan|Oda Değişikliği)\)$/;
+                             const _delOv = new Set((customer.ledgerOverrides || []).filter(o => o && o.isDeleted).map(o => o.txId));
+                             const _cands = (customer.extraDebts || []).filter(d => d && d.type === 'manual_debt' && _re.test(String(d.desc || '')) && !_delOv.has(`debt-extra-${d.id}`));
+                             if (_cands.length === 0) return _restoreLine;
+
+                             // Aynı odanın aktarımlarında en sık görülen tutar (normal aylık tutar)
+                             const _modeByRoom = {};
+                             _cands.forEach(d => { const rn = String(d.desc).match(_re)[1]; const a = Math.round(Number(d.amount) || 0); (_modeByRoom[rn] = _modeByRoom[rn] || {})[a] = ((_modeByRoom[rn] || {})[a] || 0) + 1; });
+                             const _rows = _cands.map(d => {
+                                 const rn = String(d.desc).match(_re)[1];
+                                 const room = rooms.find(r => r.name === rn);
+                                 const [y, m, dd] = String(d.date || '').split('-').map(Number);
+                                 const d0 = new Date(y, (m || 1) - 1, dd || 1); const d1 = new Date(d0); d1.setDate(d1.getDate() + 1);
+                                 const keys = [`${d0.getFullYear()}-${d0.getMonth()}`, `${d1.getFullYear()}-${d1.getMonth()}`];
+                                 // Sinyal 1: o ay Cari Düzenleme'de SİLİNMİŞTİ (eski kod silinmiş ayı geri ekledi)
+                                 const wasDeleted = !!room && keys.some(k => _delOv.has(`debt-${room.id}-${k}`));
+                                 // Sinyal 2: tutarı, aynı odanın diğer aylarından farklı (zam geçmişi yerine ham kira kullanıldı)
+                                 const counts = _modeByRoom[rn] || {}; const modeAmt = Number(Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0]);
+                                 const isOutlier = Object.keys(counts).length > 1 && counts[modeAmt] >= 2 && Math.round(Number(d.amount) || 0) !== modeAmt;
+                                 return { d, rn, wasDeleted, isOutlier, suspicious: wasDeleted || isOutlier };
+                             }).sort((a, b) => String(b.d.date).localeCompare(String(a.d.date)));
+                             const _defaultIds = _rows.filter(r => r.suspicious).map(r => r.d.id);
+                             const _picked = exitRepairPick.custId === customer.id ? exitRepairPick.ids : _defaultIds;
+                             const _pickedSum = _rows.filter(r => _picked.includes(r.d.id)).reduce((s, r) => s + Number(r.d.amount || 0), 0);
+                             const _after = _bal - _pickedSum;
+                             const _toggle = (id) => setExitRepairPick({ custId: customer.id, ids: _picked.includes(id) ? _picked.filter(x => x !== id) : [..._picked, id] });
+                             const _apply = () => {
+                                 const sel = _rows.filter(r => _picked.includes(r.d.id)).map(r => r.d);
+                                 if (sel.length === 0) return;
+                                 if (!window.confirm(`${sel.length} satır (${_fmt(_pickedSum)} TL) cariden kaldırılacak. Yeni bakiye: ${_fmt(_after)} TL. Onaylıyor musunuz?`)) return;
+                                 const ids = new Set(sel.map(d => d.id));
+                                 const archived = sel.map(d => ({ ...d, removedAt: Date.now(), removedBy: currentUserProfile?.name || '', removeReason: 'Çıkış aktarım hatası' }));
+                                 _save({ extraDebts: (customer.extraDebts || []).filter(d => !ids.has(d.id)), removedExitTransfers: [..._removed, ...archived] },
+                                       `${customer.name} → ${sel.length} hatalı çıkış aktarım satırı (${_fmt(_pickedSum)} TL) kaldırıldı.`);
+                                 setExitRepairPick({ custId: null, ids: [] });
+                             };
+                             return (
+                                 <>
+                                 {_restoreLine}
+                                 <div className="mb-4 rounded-2xl border-2 border-amber-300 bg-amber-50 p-4">
+                                     <div className="flex items-start gap-3">
+                                         <AlertCircle size={20} className="text-amber-600 shrink-0 mt-0.5" />
+                                         <div className="flex-1 min-w-0">
+                                             <p className="text-sm font-black text-amber-800">Çıkış sonrası oluşan bakiye tespit edildi: {_fmt(_bal)} TL</p>
+                                             <p className="text-[11px] text-amber-700 mt-0.5">Bu müşterinin aktif odası yok. Sistem borçlu müşterinin çıkışına izin vermediği için bu bakiye, eski çıkış işlemindeki aktarım hatasından kaynaklanıyor olabilir. Önerilen satırlar işaretlendi; kontrol edip kaldırabilirsiniz.</p>
+                                             <div className="mt-3 flex flex-col gap-1.5">
+                                                 {_rows.map(r => (
+                                                     <label key={r.d.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer ${_picked.includes(r.d.id) ? 'bg-white border-amber-300' : 'bg-amber-50/50 border-amber-100'}`}>
+                                                         <input type="checkbox" checked={_picked.includes(r.d.id)} onChange={() => _toggle(r.d.id)} className="accent-amber-600" />
+                                                         <span className="text-[12px] font-bold text-slate-700 w-20 shrink-0">{String(r.d.date).split('-').reverse().join('.')}</span>
+                                                         <span className="text-[11px] text-gray-600 truncate flex-1">{r.d.desc}</span>
+                                                         {r.wasDeleted && <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 shrink-0" title="Bu ay Cari Düzenleme'de silinmişti; eski çıkış kodu geri ekledi">SİLİNMİŞ AY</span>}
+                                                         {r.isOutlier && <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 shrink-0" title="Tutar, aynı odanın diğer aylarından farklı (zam geçmişi yerine ham kira kullanılmış)">FARKLI TUTAR</span>}
+                                                         <span className="text-[12px] font-black text-rose-600 shrink-0">{_fmt(r.d.amount)} TL</span>
+                                                     </label>
+                                                 ))}
+                                             </div>
+                                             <div className="mt-3 flex items-center justify-between gap-3 flex-wrap">
+                                                 <span className="text-[12px] font-bold text-slate-700">Seçilen: {_fmt(_pickedSum)} TL → Yeni bakiye: <span className={Math.abs(_after) < 1 ? 'text-emerald-600' : 'text-rose-600'}>{_fmt(_after)} TL</span>{Math.abs(_after) < 1 && ' ✓'}</span>
+                                                 <button onClick={_apply} disabled={_picked.length === 0} className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white text-xs font-bold shadow-sm">Seçilenleri Cariden Kaldır</button>
+                                             </div>
+                                         </div>
+                                     </div>
+                                 </div>
+                                 </>
+                             );
+                         })()}
                          {/* YENİ: Cari ekstre üstü bildirimler — kaç aydır tahsilat yok + kaç aylık borcu var.
                              (Aylık Borç Takip'teki hesabın aynısı; cari borç ve güncel aylık kiradan hesaplanır.) */}
                          {(() => {
