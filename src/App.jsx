@@ -4747,6 +4747,50 @@ const handleSaveEditRent = async () => {
       window.open(`https://wa.me/90${rawPhone}?text=${encoded}`, '_blank');
   };
 
+  // ============================================================================
+  // YENİ: ÇIKIŞ / ODA DEĞİŞİKLİĞİ BORÇ AKTARIMI — CARİDE GÖRÜNENİN BİREBİR AYNISI
+  // ESKİ HATA: Aktarım, borçları cariden bağımsız olarak YENİDEN hesaplıyordu:
+  //   (1) Cari Düzenleme'de SİLİNMİŞ aylar (isDeleted) yok sayılıp TAM tutarla geri ekleniyordu,
+  //   (2) Zam geçmişi / KDV geçişi dikkate alınmadan odanın HAM monthlyFee'si kullanılıyordu,
+  //   (3) toISOString() saat dilimi kaymasıyla 1 Eylül borcu "31.08" tarihine düşüyordu.
+  //   Sonuç: Carisini sıfırlayıp çıkan müşteride, çıkıştan sonra açıklanamayan bakiye (ör. 472 TL) oluşuyordu.
+  // YENİ: Aktarım doğrudan getCustomerLedger'ın ürettiği satırlardan yapılır — yani çıkış ÖNCESİ caride
+  //   ne görünüyorsa (silinen aylar hariç, düzenlenmiş tutar/tarih/açıklama ile) AYNEN kalıcı borca dönüşür.
+  //   Böylece çıkış işlemi cari bakiyeyi DEĞİŞTİRMEZ. Sadece çıkış tarihine kadar vadesi gelen aylar alınır.
+  // ============================================================================
+  const buildRoomDebtTransfer = (customer, room, label, limitDateStr) => {
+      if (!customer || !room) return null;
+      try {
+          const _pad = (n) => String(n).padStart(2, '0');
+          const _limit = limitDateStr ? parseDateLocal(limitDateStr) : new Date();
+          _limit.setHours(23, 59, 59, 999);
+          const prefix = `debt-${room.id}-`;
+          const paidKeys = new Set(room.paidMonths || []);
+          const rows = (getCustomerLedger(customer).ledger || []).filter(t =>
+              String(t.id || '').startsWith(prefix) &&   // yalnızca BU odanın kira satırları (faiz/tahsilat değil)
+              !t.isInterest &&
+              (Number(t.debt) || 0) > 0.009 &&            // 0 TL (hediye/ücretsiz) satırlar aktarılmaz
+              !paidKeys.has(String(t.id).slice(prefix.length)) && // ayrı tahsil edilmiş (paidMonths) aylar — tahsilatı da kalkacağı için aktarılmaz
+              (t.date instanceof Date ? t.date : new Date(t.date)) <= _limit
+          );
+          return rows.map((t, i) => {
+              const d = t.date instanceof Date ? t.date : new Date(t.date);
+              return {
+                  id: Date.now() + i + Math.random(),
+                  type: 'manual_debt',
+                  date: `${d.getFullYear()}-${_pad(d.getMonth() + 1)}-${_pad(d.getDate())}`, // YEREL tarih (saat dilimi kayması yok)
+                  amount: Math.round((Number(t.debt) || 0) * 100) / 100,
+                  hasKdv: (Number(t.kdvDebt) || 0) > 0.009,   // KDV ayrımı caride korunur
+                  desc: `${String(t.desc || `${room.name} Odası Kira`)} (${label})`,
+                  sourceTxId: t.id                            // hangi cari satırından aktarıldığı (iz sürmek için)
+              };
+          });
+      } catch (e) {
+          console.error('Borç aktarımı cariden hesaplanamadı, eski yönteme dönülüyor:', e);
+          return null; // null → çağıran yer eski hesaplamayı kullanır (güvenli geri dönüş)
+      }
+  };
+
 const handleEndRentConfirm = async () => {
       const room = rooms.find(r => String(r.id) === String(selectedRoomId));
       if (!room) return;
@@ -4805,6 +4849,12 @@ const handleEndRentConfirm = async () => {
               loopDate = new Date(nYear, nMonth, Math.min(targetDay, maxDayInNextMonth));
               monthCounter++;
           }
+      }
+
+      // YENİ: Aktarım, caride GÖRÜNEN satırlardan yapılır (bakiye çıkışla değişmez). Hata olursa eski liste kalır.
+      if (customerToUpdate) {
+          const _fromLedger = buildRoomDebtTransfer(customerToUpdate, room, 'Çıkış Yapılan', endRentData.exitDate);
+          if (_fromLedger) pendingDebtsToTransfer = _fromLedger;
       }
 
       // 2. Çıkış İşlemlerini Hazırla
@@ -5061,6 +5111,12 @@ const handleChangeRoomConfirm = async () => {
                 let maxDayInNextMonth = new Date(nYear, nMonth + 1, 0).getDate();
                 loopDate = new Date(nYear, nMonth, Math.min(targetDay, maxDayInNextMonth));
             }
+        }
+
+        // YENİ: Oda değişikliğinde de eski odanın borçları caride görünen haliyle aktarılır
+        if (customerToUpdate) {
+            const _fromLedger = buildRoomDebtTransfer(customerToUpdate, oldRoom, 'Oda Değişikliği', null);
+            if (_fromLedger) pendingDebtsToTransfer = _fromLedger;
         }
 
         const historyRecord = {
